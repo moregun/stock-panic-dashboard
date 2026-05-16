@@ -1,0 +1,28 @@
+# 敏感配置（含飞书 webhook）
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 本地缓存（运行时生成，不应提交）
+hs300_pe_history.json
+volume_cache.json
+history_cache.json
+dashboard_data.json
+state.json
+history.json
+
+# 临时文件
+*.log
+*.tmp

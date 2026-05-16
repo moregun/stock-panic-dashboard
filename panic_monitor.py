@@ -58,8 +58,33 @@ def log(msg):
 
 def load_config():
     global cfg
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+    # 优先从环境变量读取（GitHub Actions 环境）
+    feishu_webhook = os.environ.get("FEISHU_WEBHOOK", "")
+    # 尝试从 config.json 读取（本地开发环境）
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        # 如果环境变量有值，覆盖 config.json 中的配置
+        if feishu_webhook:
+            cfg["feishu_webhook"] = feishu_webhook
+    else:
+        # 无 config.json 时，从环境变量构建配置
+        cfg = {
+            "feishu_webhook": feishu_webhook,
+            "index_code": "000300.SH",
+            "thresholds": {
+                "drop_level1_min": 2.0,
+                "drop_level1_max": 2.9,
+                "drop_level2_min": 3.0,
+                "drop_level2_max": 3.9,
+                "drop_level3_min": 4.0,
+                "volume_ratio_threshold": 1.5,
+                "market_drop_ratio_threshold": 80.0,
+                "pe_percentile_level1_max": 0.5,
+                "pe_percentile_level2_max": 0.2,
+                "pe_percentile_level3_max": 0.1,
+            },
+        }
     for key in ["tushare_token", "level2_pe_ttm_max"]:
         if key in cfg:
             del cfg[key]

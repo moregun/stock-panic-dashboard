@@ -1,5 +1,5 @@
 {
-  "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/5549e99d-0354-4318-b11f-2d9ddaace77f",
+  "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-token-here",
   "index_code": "000300.SH",
   "thresholds": {
     "drop_level1_min": 2.0,
