@@ -25,14 +25,12 @@ jobs:
         python-version: '3.10'
         
     - name: Install dependencies
-      run: pip install tushare pandas requests
+      run: pip install akshare requests
         
     - name: Run panic monitor
       env:
-        TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
         FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
       run: |
-        python -c 'import json,os; cfg=json.load(open("config.json")); cfg["tushare_token"]=os.environ["TUSHARE_TOKEN"]; cfg["feishu_webhook"]=os.environ["FEISHU_WEBHOOK"]; json.dump(cfg,open("config.json","w"),indent=2,ensure_ascii=False)'
         python panic_monitor.py
         
     - name: Commit and push

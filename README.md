@@ -174,11 +174,11 @@ a-share-panic-dashboard/
 
 ---
 
-## 🛠️ 技术栈
+## 🔧 技术栈
 
-- **后端**：Python 3.10 + Tushare API
+- **后端**：Python 3.10 + AKShare（免费，无需注册）
 - **前端**：纯 HTML + CSS + JavaScript（无框架）
-- **数据源**：Tushare Pro（A股数据）
+- **数据源**：AKShare（新浪财经接口）
 - **部署**：GitHub Actions + GitHub Pages
 - **通知**：飞书机器人 Webhook
 

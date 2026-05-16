@@ -1,5 +1,4 @@
 {
-  "tushare_token": "a03b4ce4058701f296b53ca458df8d6c662d1492a39d73fc4ec767d3",
   "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/5549e99d-0354-4318-b11f-2d9ddaace77f",
   "index_code": "000300.SH",
   "thresholds": {
