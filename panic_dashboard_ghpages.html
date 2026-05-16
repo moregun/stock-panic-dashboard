@@ -14,6 +14,7 @@ h1 { color: #e1e8f0; font-size: 1.4rem; margin-bottom: 4px; }
 .subtitle { color: #6b7b8d; font-size: 0.85rem; margin-bottom: 20px; }
 
 /* 网格 */
+.g4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
 .g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; }
 .g2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 20px; }
 
@@ -109,7 +110,7 @@ h1 { color: #e1e8f0; font-size: 1.4rem; margin-bottom: 4px; }
 </div>
 
 <!-- 核心指标 -->
-<div class="g3">
+<div class="g4">
   <div class="card">
     <div class="card-title">当前恐慌级别</div>
     <div class="card-value level-0" id="panic-level-display">加载中</div>
@@ -243,15 +244,17 @@ function renderDashboard() {
   document.getElementById('drop-ratio-display').innerHTML = 
     '<span style="color:' + ratioColor + '">' + s.dropRatio.toFixed(1) + '%</span>';
 
-  // ── PE分位数 ───────────────
+  // ── PE分位数（0~1 转为 百分比显示） ───────────────
   const peElem = document.getElementById('pe-percentile-display');
   if (s.pePercentile != null) {
-    peElem.textContent = s.pePercentile.toFixed(1) + '%';
-    if (s.pePercentile <= 10) {
+    // 分位值范围 0~1，显示时 ×100 转为百分比
+    const pePct = s.pePercentile * 100;
+    peElem.textContent = pePct.toFixed(1) + '%';
+    if (pePct <= 10) {
       peElem.style.color = '#e53935';
-    } else if (s.pePercentile <= 20) {
+    } else if (pePct <= 20) {
       peElem.style.color = '#f57c00';
-    } else if (s.pePercentile <= 50) {
+    } else if (pePct <= 50) {
       peElem.style.color = '#f0b90b';
     } else {
       peElem.style.color = '#4caf50';
