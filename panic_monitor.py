@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 A股恐慌看板监控脚本（AKShare版）
 监测沪深300恐慌级别，触发条件时飞书告警，并更新可视化看板
 
 触发条件（必须同时满足）：
   1. 沪深300当日跌幅达标
-  2. 当日成交量 > 近20日均量 x 1.2倍（放量下跌）
-  3. 全A股下跌个股占比 > 75%（普跌）
+  2. 当日成交量 > 近20日均量 x 1.5倍（放量下跌）
+  3. 全A股下跌个股占比 > 80%（普跌）
 
-恐慌分级：
-  一级恐慌：跌幅 2.5% ~ 2.9%
-  二级恐慌：跌幅 3.0% ~ 3.9%
-  三级恐慌：跌幅 >= 4.0%
+恐慌分级（需同时满足跌幅区间 + PE分位数条件）：
+  一级恐慌：跌幅 2.0% ~ 2.9% 且 沪深300近10年PE分位数 <= 50%
+  二级恐慌：跌幅 3.0% ~ 3.9% 且 沪深300近10年PE分位数 <= 20%
+  三级恐慌：跌幅 >= 4.0%   且 沪深300近10年PE分位数 <= 10%
 
 数据源：AKShare - 新浪财经（免费，无需Token）
+PE分位数：通过东方财富接口获取沪深300近10年PE-TTM历史数据并计算
 """
 
 import akshare as ak
-import pandas as pd
 import json
 import os
 import sys
@@ -25,57 +26,174 @@ import time
 import requests
 from datetime import datetime, timedelta
 
-# 禁用代理
+# 禁用代理（避免公司网络拦截）
 os.environ["http_proxy"] = ""
 os.environ["https_proxy"] = ""
 os.environ["HTTP_PROXY"] = ""
 os.environ["HTTPS_PROXY"] = ""
 
 # 路径
-SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
-STATE_PATH  = os.path.join(SCRIPT_DIR, "state.json")
+SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH  = os.path.join(SCRIPT_DIR, "config.json")
+STATE_PATH   = os.path.join(SCRIPT_DIR, "state.json")
 HISTORY_PATH = os.path.join(SCRIPT_DIR, "history.json")
-HTML_PATH    = os.path.join(SCRIPT_DIR, "panic_dashboard.html")
+HTML_PATH     = os.path.join(SCRIPT_DIR, "panic_dashboard.html")
+PE_CACHE_PATH = os.path.join(SCRIPT_DIR, "hs300_pe_history.json")
 
 cfg = {}
 
 
 def log(msg):
     t = datetime.now().strftime("%H:%M:%S")
-    print(f"[{t}] {msg}")
+    print("[{0}] {1}".format(t, msg))
     sys.stdout.flush()
 
 
-# ── 配置加载 ─────────────────────────────────────────────────────
+# ── 配置加载 ────────────────────────────────────────────────
 
 def load_config():
     global cfg
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    # 兼容旧配置：移除 tushare_token 字段
-    if "tushare_token" in cfg:
-        del cfg["tushare_token"]
-    log(f"配置已加载，指数：{cfg['index_code']}")
+    for key in ["tushare_token", "level2_pe_ttm_max"]:
+        if key in cfg:
+            del cfg[key]
+    log("配置已加载，指数：{0}".format(cfg.get("index_code", "")))
     return cfg
 
 
-# ── 获取沪深300历史数据（新浪源）─────────────────────────────
+# ── PE分位数获取（东方财富）────────────────────────────────
+
+def fetch_and_build_pe_history():
+    """
+    从东方财富获取沪深300近10年PE-TTM历史数据，保存到本地缓存，
+    并计算当前PE-TTM在近10年数据中的分位数。
+    返回: (pe_current, percentile) 或 (None, None)
+    """
+    log("获取沪深300近10年PE-TTM历史数据（东方财富）...")
+
+    # 检查缓存（有效期1天）
+    if os.path.exists(PE_CACHE_PATH):
+        try:
+            with open(PE_CACHE_PATH, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+            if cache.get("fetch_date") == datetime.now().strftime("%Y-%m-%d"):
+                pe_current = cache.get("pe_current")
+                percentile = cache.get("percentile")
+                if pe_current is not None and percentile is not None:
+                    log("  使用今日缓存：PE-TTM={0}，分位数={1}%".format(pe_current, percentile))
+                    return pe_current, percentile
+        except Exception as e:
+            log("  读取PE缓存失败: {0}".format(e))
+
+    # 东方财富估值接口
+    try:
+        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        params = {
+            "reportName": "RPT_INDEX_DAILYVALUATION",
+            "columns": "ALL",
+            "filter": "(INDEX_CODE='000300.SH')",
+            "pageNumber": "1",
+            "pageSize": "2500",
+            "sortTypes": "-1",
+            "sortColumns": "TRADE_DATE",
+            "source": "WEB",
+            "client": "WEB",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://data.eastmoney.com/",
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        data = resp.json()
+
+        raw_list = data.get("data", [])
+        if not raw_list:
+            log("  东方财富估值接口返回空，尝试备用接口...")
+        else:
+            pe_list = []
+            pe_current = None
+            for item in raw_list:
+                pe_val = item.get("PE_TTM")
+                if pe_val is not None and str(pe_val) != "-":
+                    try:
+                        pv = float(pe_val)
+                        pe_list.append(pv)
+                        if pe_current is None:
+                            pe_current = pv
+                    except (ValueError, TypeError):
+                        continue
+
+            if len(pe_list) < 100:
+                log("  PE历史数据不足（仅{0}条）".format(len(pe_list)))
+            else:
+                sorted_pe = sorted(pe_list)
+                rank = sum(1 for x in sorted_pe if x <= pe_current)
+                percentile = round(rank / len(sorted_pe) * 100, 1)
+
+                log("  PE-TTM当前值：{0:.2f}，近10年分位数：{1:.1f}%（{2}个数据点）".format(
+                    pe_current, percentile, len(pe_list)))
+
+                cache = {
+                    "fetch_date": datetime.now().strftime("%Y-%m-%d"),
+                    "pe_current": round(pe_current, 2),
+                    "percentile": percentile,
+                    "data_count": len(pe_list),
+                }
+                with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=2)
+
+                return round(pe_current, 2), percentile
+    except Exception as e:
+        log("  东方财富PE接口失败: {0}".format(e))
+
+    # 备用：尝试AKShare的东财估值接口（ak.stock_zh_index_daily_em 没有PE，换用 index_pe 接口）
+    try:
+        log("  尝试AKShare备用接口...")
+        # ak.index_pe(symbol="sh000300") 某些版本可用
+        df_pe = ak.index_pe(symbol="sh000300")
+        if df_pe is not None and not df_pe.empty:
+            df_pe = df_pe.sort_values("date").reset_index(drop=True)
+            pe_list = [float(x) for x in df_pe["pe_ttm"].dropna().tolist() if x > 0]
+            if len(pe_list) >= 100:
+                pe_current = pe_list[-1]
+                sorted_pe = sorted(pe_list)
+                rank = sum(1 for x in sorted_pe if x <= pe_current)
+                percentile = round(rank / len(sorted_pe) * 100, 1)
+                log("  [备用] PE-TTM={0:.2f}，分位数={1:.1f}%".format(pe_current, percentile))
+                cache = {
+                    "fetch_date": datetime.now().strftime("%Y-%m-%d"),
+                    "pe_current": round(pe_current, 2),
+                    "percentile": percentile,
+                    "data_count": len(pe_list),
+                }
+                with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
+                    json.dump(cache, f, ensure_ascii=False, indent=2)
+                return round(pe_current, 2), percentile
+    except Exception as e:
+        log("  备用接口也失败: {0}".format(e))
+
+    log("  无法获取PE分位数，将跳过PE过滤条件")
+    return None, None
+
+
+# ── 沪深300历史数据（新浪源）────────────────────────────────
 
 _index_df_cache = None
+
 
 def get_hs300_history():
     """获取沪深300全部历史数据（新浪源，带缓存）"""
     global _index_df_cache
     if _index_df_cache is not None:
         return _index_df_cache
-    log("  获取沪深300历史数据（新浪财经）...")
+    log("获取沪深300历史数据（新浪财经）...")
     df = ak.stock_zh_index_daily(symbol="sh000300")
     if df.empty:
         return None
     df = df.sort_values("date").reset_index(drop=True)
     _index_df_cache = df
-    log(f"  获取到 {len(df)} 条历史数据")
+    log("  获取到 {0} 条历史数据".format(len(df)))
     return df
 
 
@@ -84,81 +202,56 @@ def get_latest_trade_date(max_lookback=10):
     df = get_hs300_history()
     if df is None or df.empty:
         return None
-    # 回溯最近 max_lookback 天，跳过周末
     today = datetime.now().date()
     for i in range(max_lookback):
         d = today - timedelta(days=i)
         d_str = d.strftime("%Y-%m-%d")
         if d.weekday() >= 5:
             continue
-        # 检查该日期是否在数据中
         if d_str in df["date"].astype(str).values:
             return d.strftime("%Y%m%d")
     return None
 
 
 def get_index_data(trade_date):
-    """
-    获取沪深300当日数据
-    返回: dict {close, pre_close, change_pct, vol}
-    """
-    log(f"获取沪深300数据：{trade_date}...")
+    """获取沪深300当日数据，返回 dict"""
+    log("获取沪深300数据：{0}...".format(trade_date))
     df = get_hs300_history()
     if df is None or df.empty:
         log("  沪深300数据为空")
         return None
 
-    # 格式化目标日期
     d_obj = datetime.strptime(trade_date, "%Y%m%d")
     target = d_obj.strftime("%Y-%m-%d")
-
-    # 找到目标行
     df_str = df["date"].astype(str)
     if target not in df_str.values:
-        log(f"  未找到日期 {target} 的数据")
+        log("  未找到日期 {0} 的数据".format(target))
         return None
 
     idx = df_str[df_str == target].index[0]
     row = df.iloc[idx]
-
     close = float(row["close"])
+    pre_close = float(df.iloc[idx - 1]["close"]) if idx > 0 else None
 
-    # 前收盘价
-    pre_close = None
-    if idx > 0:
-        pre_close = float(df.iloc[idx - 1]["close"])
-
-    # 涨跌幅
+    change_pct = None
     if pre_close and pre_close > 0:
         change_pct = (close - pre_close) / pre_close * 100
-    elif "close" in df.columns and idx > 0:
-        # 用昨日收盘价计算
-        change_pct = (close - pre_close) / pre_close * 100
-    else:
-        change_pct = None
 
     vol = float(row["volume"]) if "volume" in df.columns else 0
-
-    log(f"  收盘：{close:.2f}，跌幅：{change_pct:.2f}%，成交量：{vol:.0f}（手）")
+    log("  收盘：{0:.2f}，跌幅：{1:.2f}%，成交量：{2:.0f}（手）".format(close, change_pct or 0, vol))
     return {
         "close": close,
         "pre_close": pre_close,
         "change_pct": change_pct,
         "volume": vol,
-        "pe_ttm": None,  # AKShare 暂无指数PE-TTM
         "trade_date": trade_date,
     }
 
 
 def get_volume_ratio(trade_date, window=20):
-    """
-    计算量比 = 今日成交量 / 近window日均量
-    返回: (volume_ratio, today_vol, avg_vol)
-    """
-    log(f"计算量比（最近{window}日均量）...")
+    """计算量比 = 今日成交量 / 近window日均量"""
+    log("计算量比（最近{0}日均量）...".format(window))
     cache_path = os.path.join(SCRIPT_DIR, "volume_cache.json")
-
-    # 读缓存
     cache = {}
     if os.path.exists(cache_path):
         try:
@@ -169,16 +262,14 @@ def get_volume_ratio(trade_date, window=20):
 
     today_str = datetime.now().strftime("%Y-%m-%d")
     if cache.get("date") == today_str and "ratio" in cache:
-        log(f"  使用缓存量比：{cache['ratio']:.2f}x")
+        log("  使用缓存量比：{0:.2f}x".format(cache["ratio"]))
         return cache["ratio"], cache.get("today_vol", 0), cache.get("avg_vol", 0)
 
-    # 获取历史数据
     df = get_hs300_history()
     if df is None or len(df) < window + 1:
         log("  数据不足，无法计算量比")
         return None, 0, 0
 
-    # 找到目标日期位置
     d_obj = datetime.strptime(trade_date, "%Y%m%d")
     target = d_obj.strftime("%Y-%m-%d")
     df_str = df["date"].astype(str)
@@ -187,17 +278,16 @@ def get_volume_ratio(trade_date, window=20):
         return None, 0, 0
 
     idx = df_str[df_str == target].index[0]
-
     if idx < window:
-        log("  历史数据不足20日")
+        log("  历史数据不足{0}日".format(window))
         return None, 0, 0
 
     today_vol = float(df.iloc[idx]["volume"])
     hist_vols = [float(df.iloc[idx - j]["volume"]) for j in range(1, window + 1)]
     avg_vol = sum(hist_vols) / len(hist_vols)
     ratio = today_vol / avg_vol if avg_vol > 0 else None
-
-    log(f"  今日量：{today_vol:.0f}，{window}日均量：{avg_vol:.0f}，量比：{ratio:.2f}x")
+    log("  今日量：{0:.0f}，{1}日均量：{2:.0f}，量比：{3:.2f}x".format(
+        today_vol, window, avg_vol, ratio or 0))
 
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
@@ -213,19 +303,15 @@ def get_volume_ratio(trade_date, window=20):
     return ratio, today_vol, avg_vol
 
 
-# ── 获取全A股下跌比例（新浪源）─────────────────────────────
+# ── 获取全A股下跌比例（新浪源）────────────────────────────────
 
 def get_market_drop_ratio(trade_date):
-    """
-    获取全A股数据，计算下跌个股占比
-    新浪源：ak.stock_zh_a_spot()
-    返回: (drop_ratio%, total, drop_count)
-    """
+    """获取全A股数据，计算下跌个股占比，返回 (drop_ratio%, total, drop_count)"""
     log("获取全A股数据（新浪财经实时）...")
     try:
         df = ak.stock_zh_a_spot()
     except Exception as e:
-        log(f"  获取全A股数据失败: {e}")
+        log("  获取全A股数据失败: {0}".format(e))
         return None, 0, 0
 
     if df.empty:
@@ -236,7 +322,6 @@ def get_market_drop_ratio(trade_date):
     drop_count = 0
     for _, row in df.iterrows():
         try:
-            # 新浪 spot 数据：close 为最新价，pre_close 为昨收
             close = float(row.get("close", 0))
             pre_close = float(row.get("pre_close", 0))
             if pre_close > 0 and close < pre_close:
@@ -245,11 +330,11 @@ def get_market_drop_ratio(trade_date):
             continue
 
     ratio = (drop_count / total * 100) if total > 0 else 0
-    log(f"  全A股 {total} 只，下跌 {drop_count} 只，占比 {ratio:.1f}%")
+    log("  全A股 {0} 只，下跌 {1} 只，占比 {2:.1f}%".format(total, drop_count, ratio))
     return ratio, total, drop_count
 
 
-# ── 恐慌判断 ─────────────────────────────────────────────────────
+# ── 恐慌判断 ─────────────────────────────────────────────────
 
 def check_panic_conditions(index_data, volume_ratio, market_drop_ratio, cfg):
     t = cfg["thresholds"]
@@ -263,12 +348,15 @@ def check_panic_conditions(index_data, volume_ratio, market_drop_ratio, cfg):
         "cond3_value": market_drop_ratio,
     }
 
+    # 条件1：跌幅达标（达到一级阈值2.0%）
     if change_pct is not None and change_pct <= -t["drop_level1_min"]:
         details["cond1_met"] = True
 
+    # 条件2：放量下跌（量比 >= 1.5x）
     if volume_ratio is not None and volume_ratio >= t["volume_ratio_threshold"]:
         details["cond2_met"] = True
 
+    # 条件3：全市场普跌（下跌占比 >= 80%）
     if market_drop_ratio is not None and market_drop_ratio >= t["market_drop_ratio_threshold"]:
         details["cond3_met"] = True
 
@@ -276,26 +364,53 @@ def check_panic_conditions(index_data, volume_ratio, market_drop_ratio, cfg):
     return all_met, details
 
 
-def classify_panic_level(change_pct, pe_ttm, cfg):
-    """恐慌分级（AKShare版暂不考虑PE-TTM）"""
+def classify_panic_level(change_pct, pe_percentile, cfg):
+    """
+    恐慌分级（新逻辑：需同时满足跌幅区间 + PE分位数）
+    返回: (level, level_name)
+    """
     t = cfg["thresholds"]
     abs_drop = abs(change_pct)
 
+    # 从高到低判断，检查PE分位数条件
+    # 三级恐慌：跌幅 >= 4.0% 且 PE分位数 <= 10%
     if abs_drop >= t["drop_level3_min"]:
-        return 3, "三级恐慌"
-    elif abs_drop >= t["drop_level2_min"]:
-        return 2, "二级恐慌"
-    elif abs_drop >= t["drop_level1_min"]:
-        return 1, "一级恐慌"
-    else:
-        return 0, "未触发"
+        if pe_percentile is not None:
+            if pe_percentile <= t["pe_percentile_level3_max"]:
+                return 3, "三级恐慌"
+            # PE分位数不满足，继续看是否能匹配更低级别
+        else:
+            # PE数据缺失，按跌幅直接给级别（保守）
+            return 3, "三级恐慌（PE数据缺失）"
+
+    # 二级恐慌：跌幅 3.0% ~ 3.9% 且 PE分位数 <= 20%
+    if abs_drop >= t["drop_level2_min"] and abs_drop < t["drop_level3_min"]:
+        if pe_percentile is not None:
+            if pe_percentile <= t["pe_percentile_level2_max"]:
+                return 2, "二级恐慌"
+        else:
+            return 2, "二级恐慌（PE数据缺失）"
+
+    # 一级恐慌：跌幅 2.0% ~ 2.9% 且 PE分位数 <= 50%
+    if abs_drop >= t["drop_level1_min"] and abs_drop < t["drop_level2_min"]:
+        if pe_percentile is not None:
+            if pe_percentile <= t["pe_percentile_level1_max"]:
+                return 1, "一级恐慌"
+        else:
+            return 1, "一级恐慌（PE数据缺失）"
+
+    return 0, "未触发"
 
 
-# ── 状态管理（防重复告警）────────────────────────────────────────
+# ── 状态管理（防重复告警）────────────────────────────────────
 
 def load_state():
     if not os.path.exists(STATE_PATH):
-        return {"last_alert_date": "", "alerted_levels": {"1": False, "2": False, "3": False}, "last_check_date": ""}
+        return {
+            "last_alert_date": "",
+            "alerted_levels": {"1": False, "2": False, "3": False},
+            "last_check_date": ""
+        }
     with open(STATE_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -319,9 +434,10 @@ def should_alert(state, level, today_str):
     return True, state
 
 
-# ── 飞书通知 ─────────────────────────────────────────────────────
+# ── 飞书通知 ─────────────────────────────────────────────────
 
-def send_feishu(index_data, volume_ratio, market_drop_ratio, level, level_name, cfg):
+def send_feishu(index_data, volume_ratio, market_drop_ratio,
+                level, level_name, pe_percentile, cfg):
     webhook = cfg.get("feishu_webhook", "")
     if not webhook:
         log("  未配置飞书 webhook，跳过通知")
@@ -330,27 +446,37 @@ def send_feishu(index_data, volume_ratio, market_drop_ratio, level, level_name, 
     change_pct = index_data["change_pct"]
     t = cfg["thresholds"]
 
-    cond1 = f"✅ 沪深300跌 {abs(change_pct):.2f}%（>={t['drop_level1_min']}%）"
-    cond2 = f"✅ 放量下跌（量比 {volume_ratio:.2f}x，>={t['volume_ratio_threshold']}x）"
-    cond3 = f"✅ 全A股 {market_drop_ratio:.1f}% 个股下跌（>={t['market_drop_ratio_threshold']}%）"
-
     lines = [
-        f"🚨 A股恐慌告警",
-        f"级别：{level_name}（跌幅 {abs(change_pct):.2f}%）",
-        "___",
+        "A股恐慌告警",
+        "级别：{0}（跌幅 {1:.2f}%）".format(level_name, abs(change_pct)),
+        "---",
         "触发条件：",
-        cond1,
-        cond2,
-        cond3,
-        "___",
-        datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "沪深300跌 {0:.2f}%（>= {1}%）".format(abs(change_pct), t["drop_level1_min"]),
+        "放量下跌（量比 {0:.2f}x，>= {1}x）".format(volume_ratio, t["volume_ratio_threshold"]),
+        "全A股 {0:.1f}% 个股下跌（>= {1}%）".format(
+            market_drop_ratio, t["market_drop_ratio_threshold"]),
+        "---",
     ]
+
+    if pe_percentile is not None:
+        lines.append("沪深300近10年PE分位数：{0:.1f}%".format(pe_percentile))
+        if level == 1:
+            lines.append("（要求 <= {0}%）".format(t["pe_percentile_level1_max"]))
+        elif level == 2:
+            lines.append("（要求 <= {0}%）".format(t["pe_percentile_level2_max"]))
+        elif level == 3:
+            lines.append("（要求 <= {0}%）".format(t["pe_percentile_level3_max"]))
+    else:
+        lines.append("沪深300 PE分位数：数据获取中...")
+
+    lines.append("---")
+    lines.append(datetime.now().strftime("%Y-%m-%d %H:%M"))
 
     try:
         content_parts = []
         for line in lines:
-            if line.startswith("___"):
-                content_parts.append([{"tag": "text", "text": "─" * 30}])
+            if line == "---":
+                content_parts.append([{"tag": "text", "text": "-" * 30}])
             else:
                 content_parts.append([{"tag": "text", "text": line}])
 
@@ -359,7 +485,7 @@ def send_feishu(index_data, volume_ratio, market_drop_ratio, level, level_name, 
             "content": {
                 "post": {
                     "zh_cn": {
-                        "title": f"🚨 A股{level_name}",
+                        "title": "A股{0}".format(level_name),
                         "content": content_parts,
                     }
                 }
@@ -371,12 +497,12 @@ def send_feishu(index_data, volume_ratio, market_drop_ratio, level, level_name, 
         if result.get("code") == 0:
             log("  [飞书] 通知发送成功")
         else:
-            log(f"  [飞书] 通知发送失败: {result}")
+            log("  [飞书] 通知发送失败: {0}".format(result))
     except Exception as e:
-        log(f"  [飞书] 通知异常: {e}")
+        log("  [飞书] 通知异常: {0}".format(e))
 
 
-# ── 历史记录 ──────────────────────────────────────────────────────
+# ── 历史记录 ──────────────────────────────────────────────────
 
 def load_history():
     if not os.path.exists(HISTORY_PATH):
@@ -390,7 +516,8 @@ def save_history(history):
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
-def append_history(history, index_data, volume_ratio, market_drop_ratio, level, level_name):
+def append_history(history, index_data, volume_ratio, market_drop_ratio,
+                  level, level_name, pe_percentile):
     entry = {
         "date": index_data["trade_date"],
         "level": level,
@@ -398,7 +525,7 @@ def append_history(history, index_data, volume_ratio, market_drop_ratio, level, 
         "drop_pct": round(index_data["change_pct"], 2),
         "volume_ratio": round(volume_ratio, 2) if volume_ratio else None,
         "market_drop_ratio": round(market_drop_ratio, 1) if market_drop_ratio else None,
-        "pe_ttm": None,
+        "pe_percentile": round(pe_percentile, 1) if pe_percentile is not None else None,
         "signal_close": round(index_data["close"], 2),
         "return_5d": None,
         "return_20d": None,
@@ -420,7 +547,9 @@ def update_signal_returns(history):
     for entry in history:
         if "signal_close" not in entry or not entry["signal_close"]:
             continue
-        if entry.get("return_5d") is None or entry.get("return_20d") is None or entry.get("return_60d") is None:
+        if (entry.get("return_5d") is None or
+                entry.get("return_20d") is None or
+                entry.get("return_60d") is None):
             need_update.append(entry)
 
     if not need_update:
@@ -428,8 +557,9 @@ def update_signal_returns(history):
 
     earliest = min(e["date"] for e in need_update)
     today = datetime.now().strftime("%Y%m%d")
+    log("  更新 {0} 条信号的后续收益（{1} ~ {2}）...".format(
+        len(need_update), earliest, today))
 
-    log(f"  更新 {len(need_update)} 条信号的后续收益（{earliest} ~ {today}）...")
     df = get_hs300_history()
     if df is None or df.empty:
         return history
@@ -467,7 +597,7 @@ def update_signal_returns(history):
         if updated:
             updated_count += 1
 
-    log(f"  已更新 {updated_count} 条信号的收益数据")
+    log("  已更新 {0} 条信号的收益数据".format(updated_count))
     return history
 
 
@@ -479,7 +609,7 @@ def backfill_history():
     start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
 
     log("=" * 60)
-    log(f"  开始回溯历史恐慌信号：{start_date} ~ {end_date}")
+    log("  开始回溯历史恐慌信号：{0} ~ {1}".format(start_date, end_date))
     log("=" * 60)
 
     df = get_hs300_history()
@@ -487,11 +617,9 @@ def backfill_history():
         log("无历史数据")
         return
 
-    # 过滤日期范围
     df_str = df["date"].astype(str)
     start_fmt = start_date[:4] + "-" + start_date[4:6] + "-" + start_date[6:]
     end_fmt = end_date[:4] + "-" + end_date[4:6] + "-" + end_date[6:]
-
     mask = (df_str >= start_fmt) & (df_str <= end_fmt)
     df = df[mask].reset_index(drop=True)
 
@@ -499,7 +627,7 @@ def backfill_history():
         log("指定范围内无数据")
         return
 
-    log(f"  获取到 {len(df)} 条日线数据")
+    log("  获取到 {0} 条日线数据".format(len(df)))
 
     # 计算每日量比
     log("计算每日量比...")
@@ -514,12 +642,11 @@ def backfill_history():
         ratio = vol / avg_vol if avg_vol > 0 else 0
         volume_ratios[d] = round(ratio, 2)
 
-    log(f"  量比计算完成，共 {len(volume_ratios)} 个交易日")
+    log("  量比计算完成，共 {0} 个交易日".format(len(volume_ratios)))
 
-    # 加载已有历史
     existing = load_history()
     existing_dates = {e.get("date") for e in existing if e.get("date")}
-    log(f"  已有历史记录 {len(existing_dates)} 条，将跳过重复日期")
+    log("  已有历史记录 {0} 条，将跳过重复日期".format(len(existing_dates)))
 
     t = cfg["thresholds"]
     new_entries = []
@@ -544,19 +671,27 @@ def backfill_history():
             continue
 
         candidate_count += 1
-        log(f"  候选 #{candidate_count}：{trade_date} 跌幅{change_pct:.2f}% 量比{vol_ratio:.2f}x")
+        log("  候选 #{0}：{1} 跌幅{2:.2f}% 量比{3:.2f}x".format(
+            candidate_count, trade_date, change_pct, vol_ratio))
 
-        # 全A股数据（仅当天实时，回溯时跳过条件3的严格检查）
-        # 回溯时不获取全A股数据（API限制），仅用条件1+2
-        market_drop_ratio = 80.0  # 假设满足条件3（回溯时放宽）
-
+        # 回溯时不获取全A股数据，假设条件3满足
+        market_drop_ratio = 80.0
         if market_drop_ratio < t["market_drop_ratio_threshold"]:
-            log(f"    ❌ 条件3未满足")
+            log("    [X] 条件3未满足")
             continue
 
-        log(f"    ✅ 三个条件满足，记录恐慌信号")
+        log("    [OK] 三个条件满足，记录恐慌信号")
 
-        level, level_name = classify_panic_level(change_pct, None, cfg)
+        # 回溯时PE分位数不可用，按跌幅直接分级
+        abs_drop = abs(change_pct)
+        if abs_drop >= t["drop_level3_min"]:
+            level, level_name = 3, "三级恐慌（回溯）"
+        elif abs_drop >= t["drop_level2_min"]:
+            level, level_name = 2, "二级恐慌（回溯）"
+        elif abs_drop >= t["drop_level1_min"]:
+            level, level_name = 1, "一级恐慌（回溯）"
+        else:
+            continue
 
         entry = {
             "date": trade_date,
@@ -565,7 +700,7 @@ def backfill_history():
             "drop_pct": round(change_pct, 2),
             "volume_ratio": round(vol_ratio, 2),
             "market_drop_ratio": round(market_drop_ratio, 1),
-            "pe_ttm": None,
+            "pe_percentile": None,
             "signal_close": round(close, 2),
             "return_5d": None,
             "return_20d": None,
@@ -581,7 +716,7 @@ def backfill_history():
         log("=" * 60)
         return
 
-    log(f"回溯完成，新发现 {len(new_entries)} 个恐慌信号")
+    log("回溯完成，新发现 {0} 个恐慌信号".format(len(new_entries)))
 
     merged = existing[:]
     merged.extend(new_entries)
@@ -597,13 +732,14 @@ def backfill_history():
     merged = update_signal_returns(merged)
 
     save_history(merged)
-    log(f"历史信号已保存（共 {len(merged)} 条）")
+    log("历史信号已保存（共 {0} 条）".format(len(merged)))
     log("=" * 60)
 
 
-# ── 更新 HTML 看板 ─────────────────────────────────────────────────
+# ── 更新 HTML 看板 ─────────────────────────────────────────────
 
-def update_dashboard_html(index_data, volume_ratio, market_drop_ratio, level, history):
+def update_dashboard_html(index_data, volume_ratio, market_drop_ratio,
+                         level, pe_percentile, history):
     if not os.path.exists(HTML_PATH):
         log("  HTML看板文件不存在，跳过更新")
         return
@@ -615,7 +751,7 @@ def update_dashboard_html(index_data, volume_ratio, market_drop_ratio, level, hi
         "indexDrop": round(index_data["change_pct"], 2) if index_data["change_pct"] else 0,
         "volumeRatio": round(volume_ratio, 2) if volume_ratio else 0,
         "dropRatio": round(market_drop_ratio, 1) if market_drop_ratio else 0,
-        "peTtm": None,
+        "pePercentile": round(pe_percentile, 1) if pe_percentile is not None else None,
         "panicLevel": level,
         "indexClose": round(index_data["close"], 2),
         "updateTime": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -630,7 +766,7 @@ def update_dashboard_html(index_data, volume_ratio, market_drop_ratio, level, hi
             "drop_pct": h.get("drop_pct"),
             "volume_ratio": h.get("volume_ratio"),
             "market_drop_ratio": h.get("market_drop_ratio"),
-            "pe_ttm": h.get("pe_ttm"),
+            "pe_percentile": h.get("pe_percentile"),
             "return_5d": h.get("return_5d"),
             "return_20d": h.get("return_20d"),
             "return_60d": h.get("return_60d"),
@@ -662,7 +798,7 @@ def update_dashboard_html(index_data, volume_ratio, market_drop_ratio, level, hi
     log("  [HTML] 看板已更新，dashboard_data.json 已生成")
 
 
-# ── 主流程 ────────────────────────────────────────────────────────
+# ── 主流程 ───────────────────────────────────────────────────
 
 def main():
     global cfg
@@ -672,8 +808,8 @@ def main():
         return
 
     log("=" * 60)
-    log(f"  A股恐慌看板监控脚本启动（AKShare版）")
-    log(f"  时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log("  A股恐慌看板监控脚本启动（AKShare版）")
+    log("  时间：{0}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     log("=" * 60)
 
     load_config()
@@ -682,7 +818,7 @@ def main():
     if not trade_date:
         log("未找到有效交易日，退出")
         return
-    log(f"最新交易日：{trade_date}")
+    log("最新交易日：{0}".format(trade_date))
 
     index_data = get_index_data(trade_date)
     if not index_data:
@@ -692,21 +828,28 @@ def main():
     volume_ratio, _, _ = get_volume_ratio(trade_date)
     market_drop_ratio, _, _ = get_market_drop_ratio(trade_date)
 
+    # 获取PE分位数
+    _, pe_percentile = fetch_and_build_pe_history()
+    if pe_percentile is None:
+        log("  PE分位数获取失败，将跳过PE过滤条件")
+
     all_met, details = check_panic_conditions(index_data, volume_ratio, market_drop_ratio, cfg)
 
     log("-" * 60)
     c1 = details["cond1_value"]
     c2 = details["cond2_value"]
     c3 = details["cond3_value"]
-    log(f"条件1（跌幅）：{c1:.2f}% -> {'✅' if details['cond1_met'] else '❌'}")
+    log("条件1（跌幅）：{0:.2f}% -> {1}".format(c1, "OK" if details["cond1_met"] else "FAIL"))
     if c2 is not None:
-        log(f"条件2（量比）：{c2:.2f}x -> {'✅' if details['cond2_met'] else '❌'}")
+        log("条件2（量比）：{0:.2f}x -> {1}".format(c2, "OK" if details["cond2_met"] else "FAIL"))
     else:
-        log("条件2（量比）：数据不足 -> ❌")
+        log("条件2（量比）：数据不足 -> FAIL")
     if c3 is not None:
-        log(f"条件3（普跌）：{c3:.1f}% -> {'✅' if details['cond3_met'] else '❌'}")
+        log("条件3（普跌）：{0:.1f}% -> {1}".format(c3, "OK" if details["cond3_met"] else "FAIL"))
     else:
-        log("条件3（普跌）：数据不足 -> ❌")
+        log("条件3（普跌）：数据不足 -> FAIL")
+    if pe_percentile is not None:
+        log("PE分位数：{0:.1f}%".format(pe_percentile))
     log("-" * 60)
 
     if not all_met:
@@ -714,28 +857,38 @@ def main():
         history = load_history()
         history = update_signal_returns(history)
         save_history(history)
-        update_dashboard_html(index_data, volume_ratio, market_drop_ratio, 0, history)
+        update_dashboard_html(index_data, volume_ratio, market_drop_ratio, 0, pe_percentile, history)
         log("完成（未触发）")
         return
 
-    level, level_name = classify_panic_level(index_data["change_pct"], index_data.get("pe_ttm"), cfg)
-    log(f"★★ 触发{level_name}！级别：{level}")
+    # 三个条件满足，进行分级（需同时满足PE分位数条件）
+    level, level_name = classify_panic_level(index_data["change_pct"], pe_percentile, cfg)
+    if level == 0:
+        log("三个条件满足，但 {0}，不触发告警".format(level_name))
+        history = load_history()
+        history = update_signal_returns(history)
+        save_history(history)
+        update_dashboard_html(index_data, volume_ratio, market_drop_ratio, 0, pe_percentile, history)
+        return
+
+    log("★★ 触发{0}！级别：{1}".format(level_name, level))
 
     state = load_state()
     today_str = datetime.now().strftime("%Y-%m-%d")
     should, state = should_alert(state, level, today_str)
 
     if not should:
-        log(f"今日该级别（{level}）已告警过，跳过")
+        log("今日该级别（{0}）已告警过，跳过".format(level))
     else:
         log("发送飞书告警通知...")
-        send_feishu(index_data, volume_ratio, market_drop_ratio, level, level_name, cfg)
-
+        send_feishu(index_data, volume_ratio, market_drop_ratio,
+                     level, level_name, pe_percentile, cfg)
         history = load_history()
-        history = append_history(history, index_data, volume_ratio, market_drop_ratio, level, level_name)
+        history = append_history(history, index_data, volume_ratio,
+                                market_drop_ratio, level, level_name, pe_percentile)
         history = update_signal_returns(history)
         save_history(history)
-        log(f"历史记录已更新（共 {len(history)} 条）")
+        log("历史记录已更新（共 {0} 条）".format(len(history)))
 
     save_state(state)
 
@@ -743,7 +896,8 @@ def main():
     history = update_signal_returns(history)
     save_history(history)
     log("更新可视化看板...")
-    update_dashboard_html(index_data, volume_ratio, market_drop_ratio, level, history)
+    update_dashboard_html(index_data, volume_ratio, market_drop_ratio,
+                         level, pe_percentile, history)
 
     log("=" * 60)
     log("  完成")
