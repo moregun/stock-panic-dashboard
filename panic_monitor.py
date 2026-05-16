@@ -86,13 +86,46 @@ def fetch_and_build_pe_history():
         except Exception as e:
             log("  读取PE缓存失败: {0}".format(e))
 
-    # 东方财富估值接口
+    # 东方财富估值接口（已知可用接口）
     try:
-        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        # 使用东方财富公开接口获取指数PE-TTM历史数据
+        # 沪深300 内部代码：0003001（PE-TTM字段）
+        url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
         params = {
+            "secid": "1.000300",
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": "101",
+            "fqt": "1",
+            "beg": "20140101",
+            "end": "20261231",
+            "smplmt": "10000",
+            "lmt": "10000",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://quote.eastmoney.com/",
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        js = resp.json()
+
+        klines = js.get("data", {}).get("klines", [])
+        if not klines:
+            log("  东方财富K线接口返回空，尝试估值接口...")
+        else:
+            # klines 格式：日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+            # 没有PE，换用专用估值接口
+            pass
+    except Exception as e:
+        log("  东方财富K线接口失败: {0}".format(e))
+
+    # 东方财富指数估值专用接口
+    try:
+        url2 = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        params2 = {
             "reportName": "RPT_INDEX_DAILYVALUATION",
-            "columns": "ALL",
-            "filter": "(INDEX_CODE='000300.SH')",
+            "columns": "SECURITY_CODE,TRADE_DATE,PE_TTM,PB",
+            "filter": "(INDEX_CODE=\"000300.SH\")",
             "pageNumber": "1",
             "pageSize": "2500",
             "sortTypes": "-1",
@@ -100,40 +133,31 @@ def fetch_and_build_pe_history():
             "source": "WEB",
             "client": "WEB",
         }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://data.eastmoney.com/",
+        headers2 = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://data.eastmoney.com/yanus/",
         }
-        resp = requests.get(url, params=params, headers=headers, timeout=30)
-        data = resp.json()
-
-        raw_list = data.get("data", [])
-        if not raw_list:
-            log("  东方财富估值接口返回空，尝试备用接口...")
-        else:
+        resp2 = requests.get(url2, params=params2, headers=headers2, timeout=30)
+        js2 = resp2.json()
+        raw = js2.get("data", [])
+        if raw:
             pe_list = []
             pe_current = None
-            for item in raw_list:
-                pe_val = item.get("PE_TTM")
-                if pe_val is not None and str(pe_val) != "-":
-                    try:
-                        pv = float(pe_val)
+            for item in raw:
+                try:
+                    pv = float(item.get("PE_TTM", 0))
+                    if pv > 0:
                         pe_list.append(pv)
                         if pe_current is None:
                             pe_current = pv
-                    except (ValueError, TypeError):
-                        continue
-
-            if len(pe_list) < 100:
-                log("  PE历史数据不足（仅{0}条）".format(len(pe_list)))
-            else:
+                except (ValueError, TypeError):
+                    continue
+            if len(pe_list) >= 100:
                 sorted_pe = sorted(pe_list)
                 rank = sum(1 for x in sorted_pe if x <= pe_current)
                 percentile = round(rank / len(sorted_pe) * 100, 1)
-
-                log("  PE-TTM当前值：{0:.2f}，近10年分位数：{1:.1f}%（{2}个数据点）".format(
+                log("  PE-TTM={0:.2f}，近10年分位数={1:.1f}%（{2}条）".format(
                     pe_current, percentile, len(pe_list)))
-
                 cache = {
                     "fetch_date": datetime.now().strftime("%Y-%m-%d"),
                     "pe_current": round(pe_current, 2),
@@ -142,10 +166,10 @@ def fetch_and_build_pe_history():
                 }
                 with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
                     json.dump(cache, f, ensure_ascii=False, indent=2)
-
                 return round(pe_current, 2), percentile
+        log("  东方财富估值接口无有效数据，尝试备用方案...")
     except Exception as e:
-        log("  东方财富PE接口失败: {0}".format(e))
+        log("  东方财富估值接口失败: {0}".format(e))
 
     # 备用：尝试AKShare的东财估值接口（ak.stock_zh_index_daily_em 没有PE，换用 index_pe 接口）
     try:
@@ -322,8 +346,8 @@ def get_market_drop_ratio(trade_date):
     drop_count = 0
     for _, row in df.iterrows():
         try:
-            close = float(row.get("close", 0))
-            pre_close = float(row.get("pre_close", 0))
+            close = float(row.get("最新价", row.get("close", 0)))
+            pre_close = float(row.get("昨收", row.get("pre_close", 0)))
             if pre_close > 0 and close < pre_close:
                 drop_count += 1
         except (ValueError, TypeError):
