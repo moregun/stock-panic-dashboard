@@ -9,8 +9,8 @@
     "drop_level3_min": 4.0,
     "volume_ratio_threshold": 1.5,
     "market_drop_ratio_threshold": 80.0,
-    "pe_percentile_level1_max": 50,
-    "pe_percentile_level2_max": 20,
-    "pe_percentile_level3_max": 10
+    "pe_percentile_level1_max": 0.5,
+    "pe_percentile_level2_max": 0.2,
+    "pe_percentile_level3_max": 0.1
   }
 }

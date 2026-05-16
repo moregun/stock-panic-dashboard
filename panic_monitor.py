@@ -10,12 +10,16 @@ A股恐慌看板监控脚本（AKShare版）
 3. 全A股下跌个股占比 > 80%（普跌）
 
 恐慌分级（需同时满足跌幅区间 + PE分位数条件）：
-一级恐慌：跌幅 2.0% ~ 2.9% 且 沪深300近10年PE分位数 <= 50%
-二级恐慌：跌幅 3.0% ~ 3.9% 且 沪深300近10年PE分位数 <= 20%
-三级恐慌：跌幅 >= 4.0%   且 沪深300近10年PE分位数 <= 10%
+一级恐慌：跌幅 2.0% ~ 2.9% 且 沪深300近10年PE分位数 <= 0.5
+二级恐慌：跌幅 3.0% ~ 3.9% 且 沪深300近10年PE分位数 <= 0.2
+三级恐慌：跌幅 >= 4.0%   且 沪深300近10年PE分位数 <= 0.1
 
-数据源：AKShare - 新浪财经（免费，无需Token）
-PE分位数：通过且慢(qieman.com) API获取（浏览器环境），备用东方财富/AKShare
+PE分位数计算方式：
+  1. 用 AKShare (ak.index_pe) 获取沪深300近10年每日PE-TTM
+  2. 计算当前PE在历史数据中的排名百分比
+  3. 分位值范围：0~1（0=历史最低PE，1=历史最高PE）
+
+数据源：AKShare（免费，无需Token）
 """
 
 import akshare as ak
@@ -24,6 +28,7 @@ import os
 import sys
 import time
 import requests
+import pandas as pd
 from datetime import datetime, timedelta
 
 # 禁用代理（避免公司网络拦截）
@@ -62,18 +67,23 @@ def load_config():
     return cfg
 
 
-# ── PE分位数获取（且慢 qieman.com）────────────────────────
-# 且慢 API：https://qieman.com/pmdj/v2/idx-eval/latest
-# 返回字段：pePercentile（0~1 小数），需 ×100 转为百分比
-# 必须用浏览器环境（Playwright）才能拿到数据，直接HTTP请求返回空
+# ── PE分位数获取（AKShare版）────────────────────────────
+# 计算步骤：
+# 1. 获取沪深300近10年每日PE-TTM数据（ak.index_pe）
+# 2. 计算当前PE在历史数据中的排名百分比（分位值）
+# 3. 分位值范围：0~1（0=历史最低PE，1=历史最高PE）
+#
+# PE分位数缓存：hs300_pe_history.json（每日更新）
 
 def fetch_and_build_pe_history():
     """
-    从且慢API获取沪深300 PE分位数（优先），备用东方财富/AKShare。
-    返回: (pe_current, percentile_percent) 或 (None, None)
-    percentile_percent: 0~100 的百分比数值
+    使用 AKShare 获取沪深300近10年PE-TTM数据，自行计算分位数。
+    数据源：ak.stock_index_pe_lg（乐咕乐股，含滚动市盈率）
+    返回: (pe_current, pe_percentile)
+      - pe_current: 当前PE-TTM值（float）
+      - pe_percentile: 分位值，范围 0~1（float）；None 表示计算失败
     """
-    log("获取沪深300 PE分位数（且慢API）...")
+    log("获取沪深300 PE-TTM数据（AKShare）...")
 
     # 检查当日缓存
     if os.path.exists(PE_CACHE_PATH):
@@ -82,168 +92,77 @@ def fetch_and_build_pe_history():
                 cache = json.load(f)
             if cache.get("fetch_date") == datetime.now().strftime("%Y-%m-%d"):
                 pe_current = cache.get("pe_current")
-                percentile = cache.get("percentile")
-                if pe_current is not None and percentile is not None:
-                    log("  使用今日缓存：PE={0}，分位数={1}%".format(pe_current, percentile))
-                    return pe_current, percentile
+                pe_pct = cache.get("pe_percentile")
+                if pe_current is not None and pe_pct is not None:
+                    log("  使用今日缓存：PE={0:.2f}，分位数={1:.3f}".format(pe_current, pe_pct))
+                    return pe_current, pe_pct
         except Exception as e:
             log("  读取PE缓存失败: {0}".format(e))
 
-    # 方法1：且慢API（Playwright）
+    # 从 AKShare 获取沪深300 PE-TTM 历史数据（乐咕乐股）
     try:
-        from playwright.sync_api import sync_playwright
-        log("  尝试且慢API（Playwright）...")
-    except ImportError:
-        log("  Playwright未安装，跳过且慢API")
-        return _fetch_pe_fallback()
+        log("  调用 ak.stock_index_pe_lg(symbol='沪深300')...")
+        df = ak.stock_index_pe_lg(symbol="沪深300")
+        if df is None or df.empty:
+            log("  AKShare 返回数据为空")
+            return None, None
 
-    api_data = [None]
+        # 过滤近10年数据
+        ten_years_ago = pd.Timestamp(datetime.now() - timedelta(days=365 * 10))
+        df["日期"] = pd.to_datetime(df["日期"])
+        df = df[df["日期"] >= ten_years_ago].reset_index(drop=True)
 
-    def _handle_response(response):
-        url = response.url
-        if 'pmdj/v2/idx-eval/latest' in url:
-            try:
-                api_data[0] = response.json()
-                log("  ✅ 且慢API响应已捕获")
-            except Exception as e:
-                log("  解析且慢API响应失败: {0}".format(e))
+        if df.empty:
+            log("  近10年数据为空，改用全部数据（共{}条）".format(len(df)))
+            df = ak.stock_index_pe_lg(symbol="沪深300")
+            df["日期"] = pd.to_datetime(df["日期"])
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.on('response', _handle_response)
-            page.goto('https://qieman.com/idx-eval', wait_until='networkidle', timeout=30000)
-            page.wait_for_timeout(3000)
-            browser.close()
+        # 使用"滚动市盈率"列（即 PE-TTM）
+        pe_col = "滚动市盈率"
+        if pe_col not in df.columns:
+            log("  未找到'{0}'列，可用列: {1}".format(pe_col, list(df.columns)))
+            return None, None
 
-        if not api_data[0]:
-            log("  且慢API未返回数据，尝试备用方案...")
-            return _fetch_pe_fallback()
+        # 清洗数据：去除NaN和非法值
+        df[pe_col] = pd.to_numeric(df[pe_col], errors="coerce")
+        df_valid = df.dropna(subset=[pe_col])
+        df_valid = df_valid[df_valid[pe_col] > 0].reset_index(drop=True)
 
-        # 在返回数据中找沪深300（indexCode: 000300.SH）
-        target = None
-        for item in api_data[0].get('idxEvalList', []):
-            if item.get('indexCode') == '000300.SH':
-                target = item
-                break
+        if len(df_valid) < 100:
+            log("  有效PE数据不足（仅 {0} 条）".format(len(df_valid)))
+            return None, None
 
-        if not target:
-            log("  且慢API返回数据中未找到沪深300，尝试备用方案...")
-            return _fetch_pe_fallback()
+        # 当前PE-TTM = 最新一条
+        pe_current = float(df_valid.iloc[-1][pe_col])
 
-        pe = target.get('pe')
-        pe_pct_decimal = target.get('pePercentile')  # 0~1 小数
-        if pe is None or pe_pct_decimal is None:
-            log("  且慢API返回数据缺少PE字段，尝试备用方案...")
-            return _fetch_pe_fallback()
+        # 计算分位数（0~1）
+        pe_list = sorted(df_valid[pe_col].tolist())
+        n = len(pe_list)
+        # 分位数 = 当前PE在历史排序中的相对位置
+        rank = sum(1 for x in pe_list if x <= pe_current)
+        pe_percentile = round(rank / n, 4)  # 0~1 范围
 
-        pe_percentile = round(pe_pct_decimal * 100, 1)  # 转成 0~100 百分比
-        pe = round(pe, 2)
-
-        log("  [且慢] PE={0}，PE分位数={1}%".format(pe, pe_percentile))
+        log("  [AKShare] PE={0:.2f}，分位数={1:.3f}（{2}条历史数据）".format(
+            pe_current, pe_percentile, n))
 
         # 写入缓存
         cache = {
             "fetch_date": datetime.now().strftime("%Y-%m-%d"),
-            "pe_current": pe,
-            "percentile": pe_percentile,
-            "source": "qieman.com",
+            "pe_current": round(pe_current, 2),
+            "pe_percentile": pe_percentile,
+            "data_count": n,
+            "source": "akshare_stock_index_pe_lg",
         }
         with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
             json.dump(cache, f, ensure_ascii=False, indent=2)
 
-        return pe, pe_percentile
+        return round(pe_current, 2), pe_percentile
 
     except Exception as e:
-        log("  且慢API调用失败: {0}，尝试备用方案...".format(e))
-        return _fetch_pe_fallback()
-
-
-def _fetch_pe_fallback():
-    """
-    备用方案：东方财富接口 → AKShare index_pe
-    返回: (pe_current, percentile_percent) 或 (None, None)
-    """
-    log("  备用方案：东方财富估值接口...")
-
-    # 东方财富指数估值专用接口
-    try:
-        url2 = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-        params2 = {
-            "reportName": "RPT_INDEX_DAILYVALUATION",
-            "columns": "SECURITY_CODE,TRADE_DATE,PE_TTM,PB",
-            "filter": "(INDEX_CODE=\"000300.SH\")",
-            "pageNumber": "1",
-            "pageSize": "2500",
-            "sortTypes": "-1",
-            "sortColumns": "TRADE_DATE",
-            "source": "WEB",
-            "client": "WEB",
-        }
-        headers2 = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://data.eastmoney.com/yanus/",
-        }
-        resp2 = requests.get(url2, params=params2, headers=headers2, timeout=30)
-        js2 = resp2.json()
-        raw = js2.get("data", [])
-        if raw:
-            pe_list = []
-            pe_current = None
-            for item in raw:
-                try:
-                    pv = float(item.get("PE_TTM", 0))
-                    if pv > 0:
-                        pe_list.append(pv)
-                        if pe_current is None:
-                            pe_current = pv
-                except (ValueError, TypeError):
-                    continue
-            if len(pe_list) >= 100:
-                sorted_pe = sorted(pe_list)
-                rank = sum(1 for x in sorted_pe if x <= pe_current)
-                percentile = round(rank / len(sorted_pe) * 100, 1)
-                log("  [东方财富] PE={0:.2f}，分位数={1:.1f}%".format(pe_current, percentile))
-                cache = {
-                    "fetch_date": datetime.now().strftime("%Y-%m-%d"),
-                    "pe_current": round(pe_current, 2),
-                    "percentile": percentile,
-                    "source": "eastmoney",
-                }
-                with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
-                    json.dump(cache, f, ensure_ascii=False, indent=2)
-                return round(pe_current, 2), percentile
-    except Exception as e:
-        log("  东方财富接口失败: {0}".format(e))
-
-    # 备用2：AKShare index_pe
-    try:
-        log("  备用方案2：AKShare index_pe...")
-        df_pe = ak.index_pe(symbol="sh000300")
-        if df_pe is not None and not df_pe.empty:
-            df_pe = df_pe.sort_values("date").reset_index(drop=True)
-            pe_list = [float(x) for x in df_pe["pe_ttm"].dropna().tolist() if x > 0]
-            if len(pe_list) >= 100:
-                pe_current = pe_list[-1]
-                sorted_pe = sorted(pe_list)
-                rank = sum(1 for x in sorted_pe if x <= pe_current)
-                percentile = round(rank / len(sorted_pe) * 100, 1)
-                log("  [AKShare] PE={0:.2f}，分位数={1:.1f}%".format(pe_current, percentile))
-                cache = {
-                    "fetch_date": datetime.now().strftime("%Y-%m-%d"),
-                    "pe_current": round(pe_current, 2),
-                    "percentile": percentile,
-                    "source": "akshare",
-                }
-                with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
-                    json.dump(cache, f, ensure_ascii=False, indent=2)
-                return round(pe_current, 2), percentile
-    except Exception as e:
-        log("  AKShare备用接口也失败: {0}".format(e))
-
-    log("  所有PE获取方案均失败，将跳过PE过滤条件")
-    return None, None
+        log("  AKShare PE获取失败: {0}".format(e))
+        import traceback
+        traceback.print_exc()
+        return None, None
 
 
 # ── 沪深300历史数据（新浪源）────────────────────────────────
@@ -528,13 +447,13 @@ def send_feishu(index_data, volume_ratio, market_drop_ratio,
     ]
 
     if pe_percentile is not None:
-        lines.append("沪深300近10年PE分位数：{0:.1f}%".format(pe_percentile))
+        lines.append("沪深300近10年PE分位数：{0:.3f}（分位值）".format(pe_percentile))
         if level == 1:
-            lines.append("（要求 <= {0}%）".format(t["pe_percentile_level1_max"]))
+            lines.append("（要求 <= {0}）".format(t["pe_percentile_level1_max"]))
         elif level == 2:
-            lines.append("（要求 <= {0}%）".format(t["pe_percentile_level2_max"]))
+            lines.append("（要求 <= {0}）".format(t["pe_percentile_level2_max"]))
         elif level == 3:
-            lines.append("（要求 <= {0}%）".format(t["pe_percentile_level3_max"]))
+            lines.append("（要求 <= {0}）".format(t["pe_percentile_level3_max"]))
     else:
         lines.append("沪深300 PE分位数：数据获取中...")
 
@@ -594,7 +513,7 @@ def append_history(history, index_data, volume_ratio, market_drop_ratio,
         "drop_pct": round(index_data["change_pct"], 2),
         "volume_ratio": round(volume_ratio, 2) if volume_ratio else None,
         "market_drop_ratio": round(market_drop_ratio, 1) if market_drop_ratio else None,
-        "pe_percentile": round(pe_percentile, 1) if pe_percentile is not None else None,
+        "pe_percentile": round(pe_percentile, 4) if pe_percentile is not None else None,
         "signal_close": round(index_data["close"], 2),
         "return_5d": None,
         "return_20d": None,
@@ -918,7 +837,7 @@ def main():
     else:
         log("条件3（普跌）：数据不足 -> FAIL")
     if pe_percentile is not None:
-        log("PE分位数：{0:.1f}%".format(pe_percentile))
+        log("PE分位数：{0:.3f}（分位值）".format(pe_percentile))
     log("-" * 60)
 
     if not all_met:
