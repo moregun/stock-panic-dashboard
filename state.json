@@ -1,0 +1,9 @@
+{
+  "last_alert_date": "",
+  "alerted_levels": {
+    "1": false,
+    "2": false,
+    "3": false
+  },
+  "last_check_date": ""
+}

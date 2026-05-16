@@ -1,0 +1,15 @@
+{
+  "tushare_token": "a03b4ce4058701f296b53ca458df8d6c662d1492a39d73fc4ec767d3",
+  "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/5549e99d-0354-4318-b11f-2d9ddaace77f",
+  "index_code": "000300.SH",
+  "thresholds": {
+    "drop_level1_min": 2.5,
+    "drop_level1_max": 2.9,
+    "drop_level2_min": 3.0,
+    "drop_level2_max": 3.9,
+    "drop_level3_min": 4.0,
+    "volume_ratio_threshold": 1.2,
+    "market_drop_ratio_threshold": 75.0,
+    "level2_pe_ttm_max": 13.0
+  }
+}

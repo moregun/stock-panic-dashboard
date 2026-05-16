@@ -1,0 +1,59 @@
+name: Update Panic Dashboard
+
+on:
+  schedule:
+    # 每个交易日 15:30 运行（收盘后）
+    - cron: '30 7 * * 1-5'  # UTC 7:30 = 北京时间 15:30
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        pip install tushare pandas requests
+        
+    - name: Run panic monitor
+      env:
+        TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+      run: |
+        # 修改 config.json 中的 token（从环境变量读取）
+        python -c "
+        import json, os;
+        with open('config.json', 'r') as f: cfg = json.load(f);
+        cfg['tushare_token'] = os.environ['TUSHARE_TOKEN'];
+        cfg['feishu_webhook'] = os.environ['FEISHU_WEBHOOK'];
+        with open('config.json', 'w') as f: json.dump(cfg, f, indent=2, ensure_ascii=False);
+        "
+        python panic_monitor.py
+        
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add state.json history.json panic_dashboard.html history_cache.json volume_cache.json || true
+        git commit -m "Update dashboard data - $(date +'%Y-%m-%d %H:%M')" || echo "No changes to commit"
+        git push
+        
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      if: always()
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: .
+        publish_branch: gh-pages
+        destination_dir: .
+        keep_files: true

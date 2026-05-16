@@ -1,0 +1,32 @@
+[
+  {
+    "date": "20241009",
+    "level": 3,
+    "level_name": "三级恐慌",
+    "drop_pct": -7.05,
+    "volume_ratio": 2.73,
+    "market_drop_ratio": 94.4,
+    "pe_ttm": 12.97,
+    "signal_close": 3955.98,
+    "return_5d": -3.14,
+    "return_20d": 1.73,
+    "return_60d": -3.43,
+    "timestamp": "2026-05-16 11:22:37",
+    "backfilled": true
+  },
+  {
+    "date": "20250407",
+    "level": 3,
+    "level_name": "三级恐慌",
+    "drop_pct": -7.05,
+    "volume_ratio": 2.1,
+    "market_drop_ratio": 98.0,
+    "pe_ttm": 11.67,
+    "signal_close": 3589.44,
+    "return_5d": 4.73,
+    "return_20d": 7.34,
+    "return_60d": 10.94,
+    "timestamp": "2026-05-16 11:22:43",
+    "backfilled": true
+  }
+]

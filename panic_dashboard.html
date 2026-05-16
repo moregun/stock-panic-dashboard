@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A股恐慌看板</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;
+  background: #0b0e14; color: #c5cdd9; min-height: 100vh; padding: 20px;
+}
+h1 { color: #e1e8f0; font-size: 1.4rem; margin-bottom: 4px; }
+.subtitle { color: #6b7b8d; font-size: 0.85rem; margin-bottom: 20px; }
+
+/* 网格 */
+.g3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; }
+.g2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 20px; }
+
+/* 卡片 */
+.card { background: #151922; border-radius: 12px; padding: 20px; border: 1px solid #1e2635; }
+.card-title { color: #6b7b8d; font-size: 0.8rem; margin-bottom: 8px; }
+.card-value { font-size: 2rem; font-weight: 700; }
+.card-sub { color: #6b7b8d; font-size: 0.75rem; margin-top: 4px; }
+
+/* 级别颜色 */
+.level-0 { color: #6b7b8d; }
+.level-1 { color: #f0b90b; }
+.level-2 { color: #f57c00; }
+.level-3 { color: #e53935; }
+
+/* 条件面板 */
+.cond-panel { background: #151922; border-radius: 12px; padding: 20px; border: 1px solid #1e2635; text-align: center; }
+.cond-name { color: #6b7b8d; font-size: 0.8rem; margin-bottom: 8px; }
+.cond-value { font-size: 1.6rem; font-weight: 700; margin-bottom: 4px; }
+.cond-status { font-size: 0.85rem; margin-top: 6px; }
+.cond-met { color: #4caf50; }
+.cond-not-met { color: #f44336; }
+.cond-bar-bg { background: #1e2635; border-radius: 4px; height: 8px; margin: 10px 0 4px; overflow: hidden; }
+.cond-bar { height: 100%; border-radius: 4px; transition: width 0.5s; }
+.cond-threshold { color: #6b7b8d; font-size: 0.7rem; margin-top: 2px; }
+
+/* 信号记录 */
+.signal-section { margin-bottom: 20px; }
+.signal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.signal-title { color: #e1e8f0; font-size: 1rem; font-weight: 600; }
+.signal-count { color: #6b7b8d; font-size: 0.8rem; }
+
+.signal-card {
+  background: #151922;
+  border-radius: 12px;
+  padding: 16px 20px;
+  border: 1px solid #1e2635;
+  margin-bottom: 12px;
+}
+.signal-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.signal-date {
+  color: #e1e8f0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.signal-badge {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.badge-1 { background: rgba(240, 185, 11, 0.15); color: #f0b90b; }
+.badge-2 { background: rgba(245, 124, 0, 0.15); color: #f57c00; }
+.badge-3 { background: rgba(229, 57, 53, 0.15); color: #e53935; }
+
+.signal-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #1e2635;
+}
+.metric-label {
+  color: #6b7b8d;
+  font-size: 0.75rem;
+  margin-bottom: 2px;
+}
+.metric-value {
+  color: #c5cdd9;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+.metric-value.drop {
+  color: #4caf50;
+}
+
+.signal-returns {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.ret-label {
+  color: #6b7b8d;
+  font-size: 0.75rem;
+  margin-bottom: 2px;
+}
+.ret-value {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.ret-up   { color: #e53935; }
+.ret-down { color: #4caf50; }
+.ret-na   { color: #6b7b8d; }
+
+.no-signal {
+  color: #6b7b8d;
+  font-size: 0.9rem;
+  text-align: center;
+  padding: 30px 0;
+}
+
+/* 响应式 */
+@media (max-width: 900px) {
+  .g3 { grid-template-columns: 1fr; }
+  .g2 { grid-template-columns: 1fr; }
+  .signal-metrics { grid-template-columns: repeat(2, 1fr); }
+  .signal-returns { grid-template-columns: repeat(3, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<h1>A股恐慌看板</h1>
+<p class="subtitle" id="update-time">数据加载中...</p>
+
+<!-- KPI 卡片 -->
+<div class="g3">
+  <div class="card">
+    <div class="card-title">当前恐慌级别</div>
+    <div class="card-value" id="panic-level-display">--</div>
+    <div class="card-sub" id="panic-level-name">数据加载中</div>
+  </div>
+  <div class="card">
+    <div class="card-title">沪深300 今日涨跌幅</div>
+    <div class="card-value" id="index-drop-display">--</div>
+    <div class="card-sub" id="index-close">沪深300</div>
+  </div>
+  <div class="card">
+    <div class="card-title">全A股下跌个股占比</div>
+    <div class="card-value" id="drop-ratio-display">--</div>
+    <div class="card-sub">>=75% 触发</div>
+  </div>
+</div>
+
+<!-- 三大条件 -->
+<div class="g3">
+  <div class="cond-panel">
+    <div class="cond-name">条件1 &middot; 沪深300跌幅</div>
+    <div class="cond-value" id="cond1-value">--</div>
+    <div class="cond-bar-bg"><div class="cond-bar" id="cond1-bar"></div></div>
+    <div class="cond-threshold" id="cond1-threshold"></div>
+    <div class="cond-status" id="cond1-status"></div>
+  </div>
+  <div class="cond-panel">
+    <div class="cond-name">条件2 &middot; 放量（量比）</div>
+    <div class="cond-value" id="cond2-value">--</div>
+    <div class="cond-bar-bg"><div class="cond-bar" id="cond2-bar"></div></div>
+    <div class="cond-threshold" id="cond2-threshold"></div>
+    <div class="cond-status" id="cond2-status"></div>
+  </div>
+  <div class="cond-panel">
+    <div class="cond-name">条件3 &middot; 全A股普跌</div>
+    <div class="cond-value" id="cond3-value">--</div>
+    <div class="cond-bar-bg"><div class="cond-bar" id="cond3-bar"></div></div>
+    <div class="cond-threshold" id="cond3-threshold"></div>
+    <div class="cond-status" id="cond3-status"></div>
+  </div>
+</div>
+
+<!-- 历史信号记录 -->
+<div class="signal-section">
+  <div class="signal-header">
+    <div class="signal-title">历史信号记录</div>
+    <div class="signal-count" id="signal-count"></div>
+  </div>
+  <div id="signal-list"></div>
+  <div class="no-signal" id="no-signal-msg" style="display:none;">暂无恐慌信号记录</div>
+</div>
+
+<!-- 数据注入 -->
+<script>
+const SNAP = {
+  "indexDrop": -1.12,
+  "volumeRatio": 1.19,
+  "dropRatio": 65.2,
+  "peTtm": 14.61,
+  "panicLevel": 0,
+  "indexClose": 4859.59,
+  "updateTime": "2026-05-16 11:23",
+  "tradeDate": "20260515",
+  "alertHistory": [
+    {
+      "date": "20241009",
+      "level": 3,
+      "drop_pct": -7.05,
+      "volume_ratio": 2.73,
+      "market_drop_ratio": 94.4,
+      "pe_ttm": 12.97,
+      "return_5d": -3.14,
+      "return_20d": 1.73,
+      "return_60d": -3.43
+    },
+    {
+      "date": "20250407",
+      "level": 3,
+      "drop_pct": -7.05,
+      "volume_ratio": 2.1,
+      "market_drop_ratio": 98.0,
+      "pe_ttm": 11.67,
+      "return_5d": 4.73,
+      "return_20d": 7.34,
+      "return_60d": 10.94
+    }
+  ]
+};
+</script>
+
+<script>
+(function() {
+  const s = SNAP;
+  const levelNames = { 0: '未触发', 1: '一级恐慌', 2: '二级恐慌', 3: '三级恐慌' };
+  const levelColors = { 0: '#6b7b8d', 1: '#f0b90b', 2: '#f57c00', 3: '#e53935' };
+
+  // 格式化日期 20260326 -> 2026-03-26
+  function fmtDate(d) {
+    if (!d || d.length !== 8) return d;
+    return d.slice(0,4) + '-' + d.slice(4,6) + '-' + d.slice(6,8);
+  }
+
+  // 收益样式
+  function retClass(v) {
+    if (v === null || v === undefined) return 'ret-na';
+    return v >= 0 ? 'ret-up' : 'ret-down';
+  }
+  function retText(v) {
+    if (v === null || v === undefined) return '--';
+    return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+  }
+
+  // ── 恐慌级别显示 ───────────────
+  const elDisplay = document.getElementById('panic-level-display');
+  const elName = document.getElementById('panic-level-name');
+  elDisplay.textContent = levelNames[s.panicLevel] || '未触发';
+  elDisplay.className = 'card-value level-' + s.panicLevel;
+  elName.textContent = s.updateTime ? '更新: ' + s.updateTime : '数据加载中';
+  document.getElementById('update-time').textContent =
+    '最后更新：' + (s.updateTime || '--') + (s.tradeDate ? '  |  交易日：' + s.tradeDate : '');
+
+  // ── KPI ────────────────────────
+  const dropColor = s.indexDrop < 0 ? '#4caf50' : (s.indexDrop > 0 ? '#e53935' : '#6b7b8d');
+  document.getElementById('index-drop-display').innerHTML =
+    '<span style="color:' + dropColor + '">' + (s.indexDrop < 0 ? '' : '+') + s.indexDrop.toFixed(2) + '%</span>';
+  document.getElementById('index-close').textContent =
+    '收盘：' + (s.indexClose ? s.indexClose.toFixed(2) : '--');
+
+  const ratioColor = s.dropRatio >= 75 ? '#e53935' : (s.dropRatio >= 50 ? '#f57c00' : '#4caf50');
+  document.getElementById('drop-ratio-display').innerHTML =
+    '<span style="color:' + ratioColor + '">' + s.dropRatio.toFixed(1) + '%</span>';
+
+  // ── 条件1：跌幅 ─────────────────
+  const cond1Val = document.getElementById('cond1-value');
+  const cond1Bar = document.getElementById('cond1-bar');
+  const cond1Stat = document.getElementById('cond1-status');
+  const cond1Thresh = document.getElementById('cond1-threshold');
+  cond1Val.innerHTML = (s.indexDrop < 0 ? '' : '+') + s.indexDrop.toFixed(2) + '%';
+  cond1Val.style.color = s.indexDrop <= -2.5 ? '#4caf50' : '#c5cdd9';
+  const cond1Pct = Math.min(Math.abs(s.indexDrop) / 5 * 100, 100);
+  cond1Bar.style.width = cond1Pct + '%';
+  cond1Bar.style.background = s.indexDrop <= -2.5 ? '#4caf50' : '#6b7b8d';
+  cond1Thresh.textContent = '阈值：>=2.5%（一级）/ >=3.0%（二级）/ >=4.0%（三级）';
+  if (s.indexDrop <= -4.0) {
+    cond1Stat.innerHTML = '<span class="cond-met">三级恐慌跌幅区间</span>';
+  } else if (s.indexDrop <= -3.0) {
+    cond1Stat.innerHTML = '<span class="cond-met">二级恐慌跌幅区间</span>';
+  } else if (s.indexDrop <= -2.5) {
+    cond1Stat.innerHTML = '<span class="cond-met">一级恐慌跌幅区间</span>';
+  } else {
+    cond1Stat.innerHTML = '<span class="cond-not-met">未达恐慌跌幅阈值</span>';
+  }
+
+  // ── 条件2：量比 ────────────────
+  const cond2Val = document.getElementById('cond2-value');
+  const cond2Bar = document.getElementById('cond2-bar');
+  const cond2Stat = document.getElementById('cond2-status');
+  const cond2Thresh = document.getElementById('cond2-threshold');
+  cond2Val.textContent = s.volumeRatio.toFixed(2) + 'x';
+  cond2Val.style.color = s.volumeRatio >= 1.2 ? '#e53935' : '#c5cdd9';
+  const cond2Pct = Math.min(s.volumeRatio / 3 * 100, 100);
+  cond2Bar.style.width = cond2Pct + '%';
+  cond2Bar.style.background = s.volumeRatio >= 1.2 ? '#e53935' : '#6b7b8d';
+  cond2Thresh.textContent = '阈值：>=1.2x（放量下跌）';
+  if (s.volumeRatio >= 1.2) {
+    cond2Stat.innerHTML = '<span class="cond-met">放量下跌</span>';
+  } else {
+    cond2Stat.innerHTML = '<span class="cond-not-met">未放量（量比 < 1.2x）</span>';
+  }
+
+  // ── 条件3：普跌 ────────────────
+  const cond3Val = document.getElementById('cond3-value');
+  const cond3Bar = document.getElementById('cond3-bar');
+  const cond3Stat = document.getElementById('cond3-status');
+  const cond3Thresh = document.getElementById('cond3-threshold');
+  cond3Val.textContent = s.dropRatio.toFixed(1) + '%';
+  cond3Val.style.color = s.dropRatio >= 75 ? '#e53935' : '#c5cdd9';
+  cond3Bar.style.width = Math.min(s.dropRatio, 100) + '%';
+  cond3Bar.style.background = s.dropRatio >= 75 ? '#e53935' : '#6b7b8d';
+  cond3Thresh.textContent = '阈值：>=75%（全A股普跌）';
+  if (s.dropRatio >= 75) {
+    cond3Stat.innerHTML = '<span class="cond-met">全A股普跌</span>';
+  } else {
+    cond3Stat.innerHTML = '<span class="cond-not-met">未达普跌阈值（当前 ' + s.dropRatio.toFixed(1) + '%）</span>';
+  }
+
+  // ── 历史信号记录 ───────────────
+  const listEl = document.getElementById('signal-list');
+  const countEl = document.getElementById('signal-count');
+  const noMsg = document.getElementById('no-signal-msg');
+  const alerts = s.alertHistory || [];
+
+  if (alerts.length === 0) {
+    noMsg.style.display = 'block';
+    countEl.textContent = '0 条记录';
+    return;
+  }
+
+  noMsg.style.display = 'none';
+  countEl.textContent = alerts.length + ' 条记录';
+
+  // 倒序显示
+  const reversed = [...alerts].reverse();
+  let html = '';
+
+  reversed.forEach(function(a) {
+    const lv = a.level || 0;
+    const badgeClass = 'badge-' + lv;
+    const lvName = levelNames[lv] || '--';
+
+    const dropStr = a.drop_pct !== undefined ? a.drop_pct.toFixed(2) + '%' : '--';
+    const vrStr = a.volume_ratio !== null && a.volume_ratio !== undefined ? a.volume_ratio.toFixed(2) + 'x' : '--';
+    const drStr = a.market_drop_ratio !== null && a.market_drop_ratio !== undefined ? a.market_drop_ratio.toFixed(1) + '%' : '--';
+    const peStr = a.pe_ttm !== null && a.pe_ttm !== undefined ? a.pe_ttm.toFixed(2) : '--';
+
+    html += '<div class="signal-card">';
+    html += '  <div class="signal-card-header">';
+    html += '    <div class="signal-date">' + fmtDate(a.date) + '</div>';
+    html += '    <div class="signal-badge ' + badgeClass + '">' + lvName + '</div>';
+    html += '  </div>';
+    html += '  <div class="signal-metrics">';
+    html += '    <div>';
+    html += '      <div class="metric-label">跌幅</div>';
+    html += '      <div class="metric-value drop">' + dropStr + '</div>';
+    html += '    </div>';
+    html += '    <div>';
+    html += '      <div class="metric-label">量比</div>';
+    html += '      <div class="metric-value">' + vrStr + '</div>';
+    html += '    </div>';
+    html += '    <div>';
+    html += '      <div class="metric-label">下跌比</div>';
+    html += '      <div class="metric-value">' + drStr + '</div>';
+    html += '    </div>';
+    html += '    <div>';
+    html += '      <div class="metric-label">PE</div>';
+    html += '      <div class="metric-value">' + peStr + '</div>';
+    html += '    </div>';
+    html += '  </div>';
+    html += '  <div class="signal-returns">';
+    html += '    <div>';
+    html += '      <div class="ret-label">5日收益</div>';
+    html += '      <div class="ret-value ' + retClass(a.return_5d) + '">' + retText(a.return_5d) + '</div>';
+    html += '    </div>';
+    html += '    <div>';
+    html += '      <div class="ret-label">20日收益</div>';
+    html += '      <div class="ret-value ' + retClass(a.return_20d) + '">' + retText(a.return_20d) + '</div>';
+    html += '    </div>';
+    html += '    <div>';
+    html += '      <div class="ret-label">60日收益</div>';
+    html += '      <div class="ret-value ' + retClass(a.return_60d) + '">' + retText(a.return_60d) + '</div>';
+    html += '    </div>';
+    html += '  </div>';
+    html += '</div>';
+  });
+
+  listEl.innerHTML = html;
+})();
+</script>
+
+</body>
+</html>
