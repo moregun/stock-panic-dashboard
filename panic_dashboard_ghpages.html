@@ -69,6 +69,33 @@ h1 { color: #e1e8f0; font-size: 1.4rem; margin-bottom: 4px; }
 /* 加载提示 */
 .loading { text-align: center; padding: 60px; color: #6b7b8d; }
 .error { text-align: center; padding: 60px; color: #e53935; }
+
+/* 策略规则区域 */
+.strategy-section { margin-top: 32px; margin-bottom: 24px; }
+.strategy-title {
+  color: #e1e8f0; font-size: 1.05rem; font-weight: 600;
+  margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+}
+.strategy-table-wrap { overflow-x: auto; }
+.strategy-table {
+  width: 100%; border-collapse: collapse; font-size: 0.82rem;
+}
+.strategy-table thead th {
+  background: #1a1f2e; color: #8b9aad; font-weight: 500;
+  padding: 10px 12px; text-align: left; border: 1px solid #1e2635;
+}
+.strategy-table tbody td {
+  padding: 10px 12px; border: 1px solid #1e2635;
+  color: #c5cdd9; line-height: 1.5;
+}
+.strategy-table tbody tr:nth-child(even) { background: #111520; }
+.strategy-table tbody tr:hover { background: #1a1f2e; }
+.strategy-divider {
+  border: none; border-top: 1px solid #1e2635; margin: 24px 0;
+}
+.strategy-level-1 { color: #f0b90b; font-weight: 600; }
+.strategy-level-2 { color: #f57c00; font-weight: 600; }
+.strategy-level-3 { color: #e53935; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -311,6 +338,76 @@ setInterval(function() {
   loadData();
 }, 5 * 60 * 1000);
 </script>
+
+<!-- 策略规则 -->
+<hr class="strategy-divider">
+
+<div class="strategy-section">
+  <div class="strategy-title">📋 一、恐慌确认条件（需同时满足）</div>
+  <div class="strategy-table-wrap">
+    <table class="strategy-table">
+      <thead>
+        <tr><th>条件序号</th><th>规则描述</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>沪深300单日跌幅触发对应分级阶梯</td></tr>
+        <tr><td>2</td><td>当日成交量 &gt; 20日成交量均值的1.5倍</td></tr>
+        <tr><td>3</td><td>全市场下跌个股占比 &gt; 80%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<hr class="strategy-divider">
+
+<div class="strategy-section">
+  <div class="strategy-title">📊 二、分级建仓规则</div>
+  <div class="strategy-table-wrap">
+    <table class="strategy-table">
+      <thead>
+        <tr><th>级别</th><th>单日跌幅区间</th><th>估值过滤条件</th><th>单次动用资金比例</th><th>买入标的配比</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="strategy-level-1">一级</td><td>2.5% ~ 2.9%</td><td>无</td><td>10% ~ 15%</td><td>100% 沪深300 ETF</td></tr>
+        <tr><td class="strategy-level-2">二级</td><td>3.0% ~ 3.9%</td><td>沪深300近10年PE分位数 &le;20%</td><td>20% ~ 25%</td><td>70% 沪深300 ETF + 30% 创业板 ETF</td></tr>
+        <tr><td class="strategy-level-3">三级</td><td>&ge; 4.0%</td><td>无</td><td>30% ~ 35%</td><td>50% 沪深300 ETF + 50% 创业板 ETF</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<hr class="strategy-divider">
+
+<div class="strategy-section">
+  <div class="strategy-title">📈 三、预备队止盈规则</div>
+  <div class="strategy-table-wrap">
+    <table class="strategy-table">
+      <thead>
+        <tr><th>止盈类型</th><th>触发条件</th><th>操作规则</th><th>补充说明</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>反弹止盈</td>
+          <td>标的反弹达到对应幅度</td>
+          <td>卖出该笔持仓的50%</td>
+          <td>一级信号：反弹+3%；二级：+4%；三级：+5%</td>
+        </tr>
+        <tr>
+          <td>时间止盈</td>
+          <td>买入后1个月内未触发反弹止盈</td>
+          <td>满1个月：卖出30%<br>满2个月：再卖出30%<br>满3个月：清仓剩余仓位</td>
+          <td>避免长期阴跌占用资金</td>
+        </tr>
+        <tr>
+          <td>资金闭环</td>
+          <td>所有卖出操作完成后</td>
+          <td>资金必须回流至预备队账户（持有短债基金）</td>
+          <td>等待下一次恐慌信号触发</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
 </body>
 </html>
