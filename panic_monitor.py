@@ -624,12 +624,61 @@ def update_signal_returns(history):
     return history
 
 
+def calculate_historical_pe_percentile(target_date_str, pe_df):
+    """
+    计算指定日期的PE分位数（使用截至该日期的历史数据）
+    target_date_str: 'YYYYMMDD' 格式
+    pe_df: PE-TTM历史数据DataFrame
+    返回: PE分位数 (0~1) 或 None
+    """
+    if pe_df is None or pe_df.empty:
+        return None
+
+    try:
+        target_date = pd.Timestamp(datetime.strptime(target_date_str, "%Y%m%d"))
+        ten_years_before = target_date - pd.Timedelta(days=365 * 10)
+
+        # 筛选截至目标日期的历史数据（最长10年）
+        mask = (pe_df["日期"] >= ten_years_before) & (pe_df["日期"] <= target_date)
+        df_window = pe_df[mask].copy()
+
+        if df_window.empty or len(df_window) < 100:
+            return None
+
+        pe_col = "滚动市盈率"
+        if pe_col not in df_window.columns:
+            return None
+
+        # 获取目标日期的PE值
+        target_pe_row = df_window[df_window["日期"] == target_date]
+        if target_pe_row.empty:
+            # 找不到精确日期，用最近的数据
+            df_sorted = df_window.sort_values("日期")
+            target_pe_row = df_sorted.iloc[-1:]
+
+        target_pe = float(target_pe_row.iloc[0][pe_col])
+
+        # 计算分位数
+        df_valid = df_window.dropna(subset=[pe_col])
+        df_valid = df_valid[df_valid[pe_col] > 0]
+
+        pe_list = sorted(df_valid[pe_col].tolist())
+        n = len(pe_list)
+        rank = sum(1 for x in pe_list if x <= target_pe)
+        pe_percentile = round(rank / n, 4)
+
+        return pe_percentile
+    except Exception as e:
+        log("  计算历史PE分位数失败({0}): {1}".format(target_date_str, e))
+        return None
+
+
 def backfill_history():
-    """回溯过去两年的恐慌信号"""
+    """回溯过去三年的恐慌信号"""
     load_config()
 
     end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=1095)).strftime("%Y%m%d")
 
     log("=" * 60)
     log("  开始回溯历史恐慌信号：{0} ~ {1}".format(start_date, end_date))
@@ -667,6 +716,20 @@ def backfill_history():
 
     log("  量比计算完成，共 {0} 个交易日".format(len(volume_ratios)))
 
+    # 获取PE-TTM历史数据用于计算历史PE分位数
+    log("获取PE-TTM历史数据...")
+    pe_df = None
+    try:
+        pe_df = ak.stock_index_pe_lg(symbol="沪深300")
+        if pe_df is not None and not pe_df.empty:
+            pe_df["日期"] = pd.to_datetime(pe_df["日期"])
+            pe_df = pe_df.sort_values("日期").reset_index(drop=True)
+            log("  PE-TTM数据获取成功，共 {0} 条".format(len(pe_df)))
+        else:
+            log("  PE-TTM数据为空")
+    except Exception as e:
+        log("  PE-TTM数据获取失败: {0}".format(e))
+
     existing = load_history()
     existing_dates = {e.get("date") for e in existing if e.get("date")}
     log("  已有历史记录 {0} 条，将跳过重复日期".format(len(existing_dates)))
@@ -703,18 +766,41 @@ def backfill_history():
             log("    [X] 条件3未满足")
             continue
 
-        log("    [OK] 三个条件满足，记录恐慌信号")
+        log("    [OK] 三个条件满足，计算PE分位数...")
 
-        # 回溯时PE分位数不可用，按跌幅直接分级
+        # 计算历史PE分位数
+        pe_percentile = calculate_historical_pe_percentile(trade_date, pe_df)
+        if pe_percentile is not None:
+            log("    PE分位数: {0:.3f}".format(pe_percentile))
+
+        # 使用PE分位数进行恐慌分级
         abs_drop = abs(change_pct)
-        if abs_drop >= t["drop_level3_min"]:
-            level, level_name = 3, "三级恐慌（回溯）"
-        elif abs_drop >= t["drop_level2_min"]:
-            level, level_name = 2, "二级恐慌（回溯）"
-        elif abs_drop >= t["drop_level1_min"]:
-            level, level_name = 1, "一级恐慌（回溯）"
+        level = 0
+        level_name = "未触发"
+
+        if pe_percentile is not None:
+            # 有PE分位数，按完整逻辑分级
+            if abs_drop >= t["drop_level3_min"] and pe_percentile <= t["pe_percentile_level3_max"]:
+                level, level_name = 3, "三级恐慌"
+            elif abs_drop >= t["drop_level2_min"] and pe_percentile <= t["pe_percentile_level2_max"]:
+                level, level_name = 2, "二级恐慌"
+            elif abs_drop >= t["drop_level1_min"] and pe_percentile <= t["pe_percentile_level1_max"]:
+                level, level_name = 1, "一级恐慌"
+            else:
+                log("    PE分位数条件未满足，跳过")
+                continue
         else:
-            continue
+            # PE数据缺失，按跌幅直接给级别（保守）
+            if abs_drop >= t["drop_level3_min"]:
+                level, level_name = 3, "三级恐慌（PE数据缺失）"
+            elif abs_drop >= t["drop_level2_min"]:
+                level, level_name = 2, "二级恐慌（PE数据缺失）"
+            elif abs_drop >= t["drop_level1_min"]:
+                level, level_name = 1, "一级恐慌（PE数据缺失）"
+            else:
+                continue
+
+        log("    分级结果: {0}".format(level_name))
 
         entry = {
             "date": trade_date,
@@ -723,7 +809,7 @@ def backfill_history():
             "drop_pct": round(change_pct, 2),
             "volume_ratio": round(vol_ratio, 2),
             "market_drop_ratio": round(market_drop_ratio, 1),
-            "pe_percentile": None,
+            "pe_percentile": round(pe_percentile, 4) if pe_percentile is not None else None,
             "signal_close": round(close, 2),
             "return_5d": None,
             "return_20d": None,
