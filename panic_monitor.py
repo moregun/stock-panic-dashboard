@@ -726,7 +726,12 @@ def update_dashboard_html(index_data, volume_ratio, market_drop_ratio, level, hi
     with open(HTML_PATH, "w", encoding="utf-8") as f:
         f.write(new_html)
 
-    log("  [HTML] 看板已更新")
+    # 同时保存 dashboard_data.json 供 GitHub Pages 使用
+    dashboard_data_path = os.path.join(SCRIPT_DIR, "dashboard_data.json")
+    with open(dashboard_data_path, "w", encoding="utf-8") as f:
+        json.dump(snap, f, ensure_ascii=False, indent=2)
+
+    log("  [HTML] 看板已更新，dashboard_data.json 已生成")
 
 
 # ── 主流程 ────────────────────────────────────────────────────────

@@ -146,9 +146,9 @@ let historyData = null;
 // 加载数据
 async function loadData() {
   try {
-    // 加载 state.json
-    const stateResp = await fetch('state.json?t=' + new Date().getTime());
-    if (!stateResp.ok) throw new Error('无法加载 state.json');
+    // 加载 dashboard_data.json
+    const stateResp = await fetch('dashboard_data.json?t=' + new Date().getTime());
+    if (!stateResp.ok) throw new Error('无法加载 dashboard_data.json');
     stateData = await stateResp.json();
     
     // 加载 history.json

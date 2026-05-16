@@ -39,6 +39,6 @@ jobs:
       run: |
         git config user.email "action@github.com"
         git config user.name "GitHub Action"
-        git add state.json history.json panic_dashboard_ghpages.html history_cache.json volume_cache.json
+        git add state.json history.json panic_dashboard_ghpages.html index.html dashboard_data.json history_cache.json volume_cache.json
         git commit -m "Auto update - $(date +'%Y-%m-%d %H:%M')" || exit 0
         git push
