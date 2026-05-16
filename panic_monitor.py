@@ -5,17 +5,17 @@ A股恐慌看板监控脚本（AKShare版）
 监测沪深300恐慌级别，触发条件时飞书告警，并更新可视化看板
 
 触发条件（必须同时满足）：
-  1. 沪深300当日跌幅达标
-  2. 当日成交量 > 近20日均量 x 1.5倍（放量下跌）
-  3. 全A股下跌个股占比 > 80%（普跌）
+1. 沪深300当日跌幅达标
+2. 当日成交量 > 近20日均量 x 1.5倍（放量下跌）
+3. 全A股下跌个股占比 > 80%（普跌）
 
 恐慌分级（需同时满足跌幅区间 + PE分位数条件）：
-  一级恐慌：跌幅 2.0% ~ 2.9% 且 沪深300近10年PE分位数 <= 50%
-  二级恐慌：跌幅 3.0% ~ 3.9% 且 沪深300近10年PE分位数 <= 20%
-  三级恐慌：跌幅 >= 4.0%   且 沪深300近10年PE分位数 <= 10%
+一级恐慌：跌幅 2.0% ~ 2.9% 且 沪深300近10年PE分位数 <= 50%
+二级恐慌：跌幅 3.0% ~ 3.9% 且 沪深300近10年PE分位数 <= 20%
+三级恐慌：跌幅 >= 4.0%   且 沪深300近10年PE分位数 <= 10%
 
 数据源：AKShare - 新浪财经（免费，无需Token）
-PE分位数：通过东方财富接口获取沪深300近10年PE-TTM历史数据并计算
+PE分位数：通过且慢(qieman.com) API获取（浏览器环境），备用东方财富/AKShare
 """
 
 import akshare as ak
@@ -62,17 +62,20 @@ def load_config():
     return cfg
 
 
-# ── PE分位数获取（东方财富）────────────────────────────────
+# ── PE分位数获取（且慢 qieman.com）────────────────────────
+# 且慢 API：https://qieman.com/pmdj/v2/idx-eval/latest
+# 返回字段：pePercentile（0~1 小数），需 ×100 转为百分比
+# 必须用浏览器环境（Playwright）才能拿到数据，直接HTTP请求返回空
 
 def fetch_and_build_pe_history():
     """
-    从东方财富获取沪深300近10年PE-TTM历史数据，保存到本地缓存，
-    并计算当前PE-TTM在近10年数据中的分位数。
-    返回: (pe_current, percentile) 或 (None, None)
+    从且慢API获取沪深300 PE分位数（优先），备用东方财富/AKShare。
+    返回: (pe_current, percentile_percent) 或 (None, None)
+    percentile_percent: 0~100 的百分比数值
     """
-    log("获取沪深300近10年PE-TTM历史数据（东方财富）...")
+    log("获取沪深300 PE分位数（且慢API）...")
 
-    # 检查缓存（有效期1天）
+    # 检查当日缓存
     if os.path.exists(PE_CACHE_PATH):
         try:
             with open(PE_CACHE_PATH, "r", encoding="utf-8") as f:
@@ -81,43 +84,88 @@ def fetch_and_build_pe_history():
                 pe_current = cache.get("pe_current")
                 percentile = cache.get("percentile")
                 if pe_current is not None and percentile is not None:
-                    log("  使用今日缓存：PE-TTM={0}，分位数={1}%".format(pe_current, percentile))
+                    log("  使用今日缓存：PE={0}，分位数={1}%".format(pe_current, percentile))
                     return pe_current, percentile
         except Exception as e:
             log("  读取PE缓存失败: {0}".format(e))
 
-    # 东方财富估值接口（已知可用接口）
+    # 方法1：且慢API（Playwright）
     try:
-        # 使用东方财富公开接口获取指数PE-TTM历史数据
-        # 沪深300 内部代码：0003001（PE-TTM字段）
-        url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-        params = {
-            "secid": "1.000300",
-            "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-            "klt": "101",
-            "fqt": "1",
-            "beg": "20140101",
-            "end": "20261231",
-            "smplmt": "10000",
-            "lmt": "10000",
-        }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://quote.eastmoney.com/",
-        }
-        resp = requests.get(url, params=params, headers=headers, timeout=30)
-        js = resp.json()
+        from playwright.sync_api import sync_playwright
+        log("  尝试且慢API（Playwright）...")
+    except ImportError:
+        log("  Playwright未安装，跳过且慢API")
+        return _fetch_pe_fallback()
 
-        klines = js.get("data", {}).get("klines", [])
-        if not klines:
-            log("  东方财富K线接口返回空，尝试估值接口...")
-        else:
-            # klines 格式：日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
-            # 没有PE，换用专用估值接口
-            pass
+    api_data = [None]
+
+    def _handle_response(response):
+        url = response.url
+        if 'pmdj/v2/idx-eval/latest' in url:
+            try:
+                api_data[0] = response.json()
+                log("  ✅ 且慢API响应已捕获")
+            except Exception as e:
+                log("  解析且慢API响应失败: {0}".format(e))
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.on('response', _handle_response)
+            page.goto('https://qieman.com/idx-eval', wait_until='networkidle', timeout=30000)
+            page.wait_for_timeout(3000)
+            browser.close()
+
+        if not api_data[0]:
+            log("  且慢API未返回数据，尝试备用方案...")
+            return _fetch_pe_fallback()
+
+        # 在返回数据中找沪深300（indexCode: 000300.SH）
+        target = None
+        for item in api_data[0].get('idxEvalList', []):
+            if item.get('indexCode') == '000300.SH':
+                target = item
+                break
+
+        if not target:
+            log("  且慢API返回数据中未找到沪深300，尝试备用方案...")
+            return _fetch_pe_fallback()
+
+        pe = target.get('pe')
+        pe_pct_decimal = target.get('pePercentile')  # 0~1 小数
+        if pe is None or pe_pct_decimal is None:
+            log("  且慢API返回数据缺少PE字段，尝试备用方案...")
+            return _fetch_pe_fallback()
+
+        pe_percentile = round(pe_pct_decimal * 100, 1)  # 转成 0~100 百分比
+        pe = round(pe, 2)
+
+        log("  [且慢] PE={0}，PE分位数={1}%".format(pe, pe_percentile))
+
+        # 写入缓存
+        cache = {
+            "fetch_date": datetime.now().strftime("%Y-%m-%d"),
+            "pe_current": pe,
+            "percentile": pe_percentile,
+            "source": "qieman.com",
+        }
+        with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+
+        return pe, pe_percentile
+
     except Exception as e:
-        log("  东方财富K线接口失败: {0}".format(e))
+        log("  且慢API调用失败: {0}，尝试备用方案...".format(e))
+        return _fetch_pe_fallback()
+
+
+def _fetch_pe_fallback():
+    """
+    备用方案：东方财富接口 → AKShare index_pe
+    返回: (pe_current, percentile_percent) 或 (None, None)
+    """
+    log("  备用方案：东方财富估值接口...")
 
     # 东方财富指数估值专用接口
     try:
@@ -156,25 +204,22 @@ def fetch_and_build_pe_history():
                 sorted_pe = sorted(pe_list)
                 rank = sum(1 for x in sorted_pe if x <= pe_current)
                 percentile = round(rank / len(sorted_pe) * 100, 1)
-                log("  PE-TTM={0:.2f}，近10年分位数={1:.1f}%（{2}条）".format(
-                    pe_current, percentile, len(pe_list)))
+                log("  [东方财富] PE={0:.2f}，分位数={1:.1f}%".format(pe_current, percentile))
                 cache = {
                     "fetch_date": datetime.now().strftime("%Y-%m-%d"),
                     "pe_current": round(pe_current, 2),
                     "percentile": percentile,
-                    "data_count": len(pe_list),
+                    "source": "eastmoney",
                 }
                 with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
                     json.dump(cache, f, ensure_ascii=False, indent=2)
                 return round(pe_current, 2), percentile
-        log("  东方财富估值接口无有效数据，尝试备用方案...")
     except Exception as e:
-        log("  东方财富估值接口失败: {0}".format(e))
+        log("  东方财富接口失败: {0}".format(e))
 
-    # 备用：尝试AKShare的东财估值接口（ak.stock_zh_index_daily_em 没有PE，换用 index_pe 接口）
+    # 备用2：AKShare index_pe
     try:
-        log("  尝试AKShare备用接口...")
-        # ak.index_pe(symbol="sh000300") 某些版本可用
+        log("  备用方案2：AKShare index_pe...")
         df_pe = ak.index_pe(symbol="sh000300")
         if df_pe is not None and not df_pe.empty:
             df_pe = df_pe.sort_values("date").reset_index(drop=True)
@@ -184,20 +229,20 @@ def fetch_and_build_pe_history():
                 sorted_pe = sorted(pe_list)
                 rank = sum(1 for x in sorted_pe if x <= pe_current)
                 percentile = round(rank / len(sorted_pe) * 100, 1)
-                log("  [备用] PE-TTM={0:.2f}，分位数={1:.1f}%".format(pe_current, percentile))
+                log("  [AKShare] PE={0:.2f}，分位数={1:.1f}%".format(pe_current, percentile))
                 cache = {
                     "fetch_date": datetime.now().strftime("%Y-%m-%d"),
                     "pe_current": round(pe_current, 2),
                     "percentile": percentile,
-                    "data_count": len(pe_list),
+                    "source": "akshare",
                 }
                 with open(PE_CACHE_PATH, "w", encoding="utf-8") as f:
                     json.dump(cache, f, ensure_ascii=False, indent=2)
                 return round(pe_current, 2), percentile
     except Exception as e:
-        log("  备用接口也失败: {0}".format(e))
+        log("  AKShare备用接口也失败: {0}".format(e))
 
-    log("  无法获取PE分位数，将跳过PE过滤条件")
+    log("  所有PE获取方案均失败，将跳过PE过滤条件")
     return None, None
 
 
