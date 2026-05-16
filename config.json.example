@@ -12,5 +12,28 @@
     "pe_percentile_level1_max": 0.5,
     "pe_percentile_level2_max": 0.2,
     "pe_percentile_level3_max": 0.1
+  },
+  "action_plan": {
+    "level1": {
+      "name": "一级恐慌",
+      "drop_range": "2.0%~2.9%",
+      "pe_condition": "≤50%",
+      "fund_usage": "10%~15%",
+      "allocation": "100% 沪深300ETF"
+    },
+    "level2": {
+      "name": "二级恐慌",
+      "drop_range": "3.0%~3.9%",
+      "pe_condition": "≤20%",
+      "fund_usage": "20%~25%",
+      "allocation": "70% 沪深300 + 30% 中证500"
+    },
+    "level3": {
+      "name": "三级恐慌",
+      "drop_range": "≥4.0%",
+      "pe_condition": "≤10%",
+      "fund_usage": "30%~35%",
+      "allocation": "60% 沪深300 + 40% 中证500"
+    }
   }
 }

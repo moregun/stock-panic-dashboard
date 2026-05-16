@@ -482,6 +482,16 @@ def send_feishu(index_data, volume_ratio, market_drop_ratio,
     else:
         lines.append("沪深300 PE分位数：数据获取中...")
 
+    # 附加操作建议（从 action_plan 读取）
+    action_plan = cfg.get("action_plan", {})
+    level_key = str(level)
+    if level_key in action_plan:
+        plan = action_plan[level_key]
+        lines.append("---")
+        lines.append("📋 操作建议：")
+        lines.append("  资金占用：{0}".format(plan.get("fund_usage", "")))
+        lines.append("  配置方案：{0}".format(plan.get("allocation", "")))
+
     lines.append("---")
     lines.append(datetime.now().strftime("%Y-%m-%d %H:%M"))
 
