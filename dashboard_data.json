@@ -1,12 +1,12 @@
 {
-  "indexDrop": 0.62,
-  "volumeRatio": 0.97,
-  "dropRatio": 29.6,
-  "pePercentile": 0.8083,
+  "indexDrop": -0.0,
+  "volumeRatio": 0.94,
+  "dropRatio": 64.2,
+  "pePercentile": 0.8148,
   "panicLevel": 0,
-  "indexClose": 4842.17,
-  "updateTime": "2026-07-03 10:15",
-  "tradeDate": "20260703",
+  "indexClose": 4842.0,
+  "updateTime": "2026-07-06 11:49",
+  "tradeDate": "20260706",
   "alertHistory": [
     {
       "date": "20241009",
